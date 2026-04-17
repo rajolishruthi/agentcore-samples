@@ -21,17 +21,18 @@ else:
 # AWS and agent configuration
 account_id, region = get_aws_info()
 
+# --- Monitor Agent (AWS AgentCore Runtime) ---
 MONITOR_AGENT_ID = get_ssm_parameter("/monitoragent/agentcore/runtime-id")
 MONITOR_PROVIDER_NAME = get_ssm_parameter("/monitoragent/agentcore/provider-name")
 MONITOR_AGENT_ARN = (
     f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{MONITOR_AGENT_ID}"
 )
 
-WEBSEARCH_AGENT_ID = get_ssm_parameter("/websearchagent/agentcore/runtime-id")
+# --- WebSearch Agent (GCP Cloud Run) ---
+# Same Cognito credential provider — AgentCore Identity fetches the token,
+# only the destination URL changes from AgentCore Runtime to GCP Cloud Run
+WEBSEARCH_GCP_URL = os.getenv("WEBSEARCH_GCP_URL")  # e.g. https://web-search-agent-xxxxx-uc.a.run.app
 WEBSEARCH_PROVIDER_NAME = get_ssm_parameter("/websearchagent/agentcore/provider-name")
-WEBSEARCH_AGENT_ARN = (
-    f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{WEBSEARCH_AGENT_ID}"
-)
 
 
 def _create_client_factory(provider_name: str, session_id: str, actor_id: str):
@@ -116,7 +117,7 @@ def _create_client_factory(provider_name: str, session_id: str, actor_id: str):
 
 
 def get_root_agent(session_id: str, actor_id: str):
-    # Create monitor agent
+    # --- Monitor Agent (AWS AgentCore Runtime — unchanged) ---
     monitor_agent_card_url = (
         f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/"
         f"{quote(MONITOR_AGENT_ARN, safe='')}/invocations/.well-known/agent-card.json"
@@ -133,11 +134,8 @@ def get_root_agent(session_id: str, actor_id: str):
         ),
     )
 
-    # Create websearch agent
-    websearch_agent_card_url = (
-        f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/"
-        f"{quote(WEBSEARCH_AGENT_ARN, safe='')}/invocations/.well-known/agent-card.json"
-    )
+    # --- WebSearch Agent (GCP Cloud Run — same auth, different URL) ---
+    websearch_agent_card_url = f"{WEBSEARCH_GCP_URL}/.well-known/agent-card.json"
 
     websearch_agent = RemoteA2aAgent(
         name="websearch_agent",

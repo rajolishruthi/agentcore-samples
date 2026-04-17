@@ -1,0 +1,15 @@
+[project]
+name = "web-search-strands-agent"
+version = "0.1.0"
+description = "Web Search Agent using Strands SDK on AgentCore Runtime (converted from OpenAI Agents)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "a2a-sdk>=0.3.8",
+    "bedrock-agentcore>=0.1.7",
+    "strands-agents>=0.1.0",
+    "strands-agents-bedrock>=0.0.1",
+    "tavily-python>=0.7.12",
+    "python-dotenv>=1.0.0",
+    "PyJWT[crypto]>=2.8.0",
+]
