@@ -3,6 +3,7 @@ from a2a.types import TransportProtocol
 from bedrock_agentcore.identity.auth import requires_access_token
 from google.adk.agents.llm_agent import Agent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+from google.adk.models.lite_llm import LiteLlm
 from prompt import SYSTEM_PROMPT
 from urllib.parse import quote
 import httpx
@@ -10,6 +11,8 @@ import os
 import uuid
 
 IS_DOCKER = os.getenv("DOCKER_CONTAINER", "0") == "1"
+# Use BEDROCK_MODEL_ID for Bedrock models via LiteLlm, or GOOGLE_MODEL_ID for Gemini
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "")
 GOOGLE_MODEL_ID = os.getenv("GOOGLE_MODEL_ID", "gemini-2.5-flash")
 
 if IS_DOCKER:
@@ -148,9 +151,15 @@ def get_root_agent(session_id: str, actor_id: str):
         ),
     )
 
+    # Select model: prefer Bedrock via LiteLlm if configured, else Gemini
+    if BEDROCK_MODEL_ID:
+        model = LiteLlm(model=f"bedrock/{BEDROCK_MODEL_ID}")
+    else:
+        model = GOOGLE_MODEL_ID
+
     # Create root agent
     root_agent = Agent(
-        model=GOOGLE_MODEL_ID,
+        model=model,
         name="root_agent",
         instruction=SYSTEM_PROMPT,
         sub_agents=[monitor_agent, websearch_agent],
@@ -172,6 +181,7 @@ async def get_agent_and_card(session_id: str, actor_id: str):
         sub_agents = root_agent.sub_agents
 
         for agent in sub_agents:
+            
             agent_data = {}
 
             # Access the source URL before resolution
