@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 APP_NAME = "HostAgentA2A"
-
-app = BedrockAgentCoreApp()
+#runtime calls when a request comes in 
+app = BedrockAgentCoreApp() 
 
 session_service = InMemorySessionService()
 
