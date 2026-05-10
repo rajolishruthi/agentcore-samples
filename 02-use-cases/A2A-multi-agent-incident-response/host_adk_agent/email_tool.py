@@ -35,6 +35,10 @@ GMAIL_PROVIDER_NAME = os.getenv("GMAIL_PROVIDER_NAME", "gmail-3lo-provider")
 GMAIL_CALLBACK_URL = os.getenv("GMAIL_CALLBACK_URL", "http://localhost:9090/oauth2/callback")
 GMAIL_GATEWAY_URL = os.getenv("GMAIL_GATEWAY_URL", "")
 
+# M2M provider for authenticating TO the Gateway (Cognito client_credentials)
+# Uses the same gateway credential provider as the monitor agent
+GATEWAY_AUTH_PROVIDER = os.getenv("GATEWAY_AUTH_PROVIDER", "GatewayOAuth2Provider-monitor-agent-a2a")
+
 # MCP protocol version that supports URL-mode elicitation
 MCP_PROTOCOL_VERSION = "2025-11-25"
 
@@ -193,7 +197,7 @@ def send_email_to_user(recipient: str, subject: str, body: str) -> str:
     """
 
     @requires_access_token(
-        provider_name=GMAIL_PROVIDER_NAME,
+        provider_name=GATEWAY_AUTH_PROVIDER,
         scopes=[],
         auth_flow="M2M",
         into="gateway_token",
