@@ -12,13 +12,18 @@ import uuid
 
 IS_DOCKER = os.getenv("DOCKER_CONTAINER", "0") == "1"
 # Use BEDROCK_MODEL_ID for Bedrock models via LiteLlm, or GOOGLE_MODEL_ID for Gemini
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-20250514-v1:0")  # Claude on Bedrock
 GOOGLE_MODEL_ID = os.getenv("GOOGLE_MODEL_ID", "gemini-2.5-flash")
 
 if IS_DOCKER:
     from utils import get_ssm_parameter, get_aws_info
+    from email_tool import send_email_tool
 else:
     from host_adk_agent.utils import get_ssm_parameter, get_aws_info
+    from host_adk_agent.email_tool import send_email_tool
+
+# Gmail 3LO is enabled when the provider name is configured
+GMAIL_3LO_ENABLED = bool(os.getenv("GMAIL_PROVIDER_NAME", ""))
 
 
 # AWS and agent configuration
@@ -163,6 +168,7 @@ def get_root_agent(session_id: str, actor_id: str):
         name="root_agent",
         instruction=SYSTEM_PROMPT,
         sub_agents=[monitor_agent, websearch_agent],
+        tools=[send_email_tool] if GMAIL_3LO_ENABLED else [],
     )
 
     return root_agent

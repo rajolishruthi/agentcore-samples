@@ -1,0 +1,46 @@
+openapi: "3.0.0"
+info:
+  title: "Gmail Send API"
+  version: "1.0.0"
+servers:
+  - url: "https://gmail.googleapis.com"
+paths:
+  /gmail/v1/users/me/messages/send:
+    post:
+      operationId: sendEmail
+      summary: "Send an email message"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                raw:
+                  type: string
+                  description: "Base64url-encoded RFC 2822 email message"
+              required:
+                - raw
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: "Email sent successfully"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  threadId:
+                    type: string
+                  labelIds:
+                    type: array
+                    items:
+                      type: string
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer

@@ -726,6 +726,9 @@ Resources:
         GOOGLE_API_KEY: !Ref GoogleApiKey
         GOOGLE_GENAI_USE_VERTEXAI: 0
         MCP_REGION: !Sub '${AWS::Region}'
+        GMAIL_PROVIDER_NAME: gmail-3lo-provider
+        GMAIL_GATEWAY_URL: !Sub 'https://gmail-send-gateway-49xbdwpwi6.gateway.bedrock-agentcore.${AWS::Region}.amazonaws.com/mcp'
+        GMAIL_CALLBACK_URL: 'http://localhost:9090/oauth2/callback'
       Tags:
         Name: !Sub '${AWS::StackName}-Agent-Runtime'
 
