@@ -46,7 +46,7 @@ class GmailOAuth2CallbackServer:
             return {"status": "healthy"}
 
         @self.app.get(OAUTH2_CALLBACK_ENDPOINT)
-        async def handle_oauth2_callback(session_id: str):
+        async def handle_oauth2_callback(session_id: str, actor_id: str = None):
             """Handle the OAuth2 callback from Google after user consent.
 
             Google redirects here with a session_id parameter. We call
@@ -60,10 +60,19 @@ class GmailOAuth2CallbackServer:
 
             try:
                 # Complete the OAuth2 flow — this stores the token in the Token Vault
-                self.identity_client.complete_resource_token_auth(
-                    session_uri=session_id,
-                )
-                logger.info(f"[3LO] OAuth2 flow completed successfully for session: {session_id[:20]}...")
+                # Pass actor_id only if provided in query params
+                if actor_id:
+                    self.identity_client.complete_resource_token_auth(
+                        session_uri=session_id,
+                        user_identifier=actor_id,
+                    )
+                    logger.info(f"[3LO] OAuth2 flow completed for session: {session_id[:20]}... actor: {actor_id}")
+                else:
+                    # Let Identity derive actor_id from session
+                    self.identity_client.complete_resource_token_auth(
+                        session_uri=session_id,
+                    )
+                    logger.info(f"[3LO] OAuth2 flow completed for session: {session_id[:20]}...")
 
                 html = """
                 <!DOCTYPE html>

@@ -76,16 +76,7 @@ def _call_gateway_mcp(gateway_url: str, access_token: str, raw_email: str) -> di
         "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
     }
 
-    # Reference the gmail-3lo-provider explicitly
-    _meta = {
-        "aws.bedrock-agentcore.gateway/credentialProviderConfiguration": {
-            "oauthCredentialProvider": {
-                "providerName": GMAIL_PROVIDER_NAME,
-                "forceAuthentication": False,
-            }
-        }
-    }
-
+    # Let gateway use its configured credential provider (no metadata override)
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -93,7 +84,6 @@ def _call_gateway_mcp(gateway_url: str, access_token: str, raw_email: str) -> di
         "params": {
             "name": GATEWAY_TOOL_NAME,
             "arguments": {"raw": raw_email},
-            "_meta": _meta,
         },
     }
 
