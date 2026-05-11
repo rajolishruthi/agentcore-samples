@@ -96,16 +96,22 @@ def _call_gateway_mcp(gateway_url: str, access_token: str, raw_email: str) -> di
         },
     }
 
+    logger.info(f"DEBUG: Calling gateway at {gateway_url}")
     with httpx.Client(timeout=120.0) as client:
         response = client.post(gateway_url, headers=headers, json=payload)
+        logger.info(f"DEBUG: Gateway response status: {response.status_code}")
+        logger.info(f"DEBUG: Gateway response body: {response.text[:500]}")
         response.raise_for_status()
         return response.json()
 
 
 def _parse_gateway_response(rpc_response: dict) -> str:
     """Parse the Gateway MCP JSON-RPC response."""
+    logger.info(f"DEBUG: Parsing gateway response: {json.dumps(rpc_response)[:500]}")
+
     if "error" in rpc_response:
         error = rpc_response["error"]
+        logger.error(f"DEBUG: Gateway returned error: {error}")
         return json.dumps({
             "error": True,
             "message": f"Gateway error: {error.get('message', 'Unknown error')}",
@@ -113,6 +119,7 @@ def _parse_gateway_response(rpc_response: dict) -> str:
 
     result = rpc_response.get("result", {})
     content_items = result.get("content", [])
+    logger.info(f"DEBUG: Found {len(content_items)} content items")
 
     for item in content_items:
         if item.get("type") == "resource":
