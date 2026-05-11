@@ -76,10 +76,11 @@ def _call_gateway_mcp(gateway_url: str, access_token: str, raw_email: str) -> di
         "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
     }
 
-    # Don't specify returnUrl - let the gateway use its default callback
+    # Use a simple success page as return URL (the token is already stored by AgentCore)
     _meta = {
         "aws.bedrock-agentcore.gateway/credentialProviderConfiguration": {
             "oauthCredentialProvider": {
+                "returnUrl": "https://bedrock-agentcore.us-west-2.amazonaws.com/identities/oauth2/success",
                 "forceAuthentication": False,
             }
         }
