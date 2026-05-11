@@ -165,12 +165,17 @@ def get_root_agent(session_id: str, actor_id: str):
         model = GOOGLE_MODEL_ID
 
     # Create root agent
+    tools_list = [send_email_tool] if GMAIL_3LO_ENABLED else []
+    print(f"DEBUG: Creating root agent with {len(tools_list)} tools, GMAIL_3LO_ENABLED={GMAIL_3LO_ENABLED}")
+    if tools_list:
+        print(f"DEBUG: Tools: {[tool.__class__.__name__ for tool in tools_list]}")
+
     root_agent = Agent(
         model=model,
         name="root_agent",
         instruction=SYSTEM_PROMPT,
         sub_agents=[monitor_agent, websearch_agent],
-        tools=[send_email_tool] if GMAIL_3LO_ENABLED else [],
+        tools=tools_list,
     )
 
     return root_agent
