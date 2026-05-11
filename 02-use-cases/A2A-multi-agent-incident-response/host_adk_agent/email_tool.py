@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 GMAIL_PROVIDER_NAME = os.getenv("GMAIL_PROVIDER_NAME", "gmail-3lo-provider")
-GMAIL_CALLBACK_URL = os.getenv("GMAIL_CALLBACK_URL", "http://localhost:9090/oauth2/callback")
+GMAIL_CALLBACK_URL = os.getenv("GMAIL_CALLBACK_URL", "https://bedrock-agentcore.us-west-2.amazonaws.com/identities/oauth2/callback/3d7be228-daa8-413a-be07-6d9578fe90fa")
 GMAIL_GATEWAY_URL = os.getenv("GMAIL_GATEWAY_URL", "")
 
 # M2M provider for authenticating TO the Gateway

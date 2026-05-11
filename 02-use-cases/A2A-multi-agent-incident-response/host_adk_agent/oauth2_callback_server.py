@@ -14,10 +14,10 @@ The server listens on port 9090 and handles:
 
 import argparse
 import logging
+import boto3
 import uvicorn
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
-from bedrock_agentcore.services.identity import IdentityClient
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -28,15 +28,10 @@ PING_ENDPOINT = "/ping"
 
 
 class GmailOAuth2CallbackServer:
-    """Handles OAuth2 callbacks for Gmail 3LO authorization flow.
-
-    When the user clicks the authorization URL and grants Gmail access,
-    Google redirects to this server. The server then calls AgentCore Identity's
-    complete_resource_token_auth() to bind the token to the user's session.
-    """
+    """Handles OAuth2 callbacks for Gmail 3LO authorization flow."""
 
     def __init__(self, region: str):
-        self.identity_client = IdentityClient(region=region)
+        self._client = boto3.client("bedrock-agentcore", region_name=region)
         self.app = FastAPI(title="Gmail 3LO Callback Server")
         self._setup_routes()
 
@@ -46,12 +41,8 @@ class GmailOAuth2CallbackServer:
             return {"status": "healthy"}
 
         @self.app.get(OAUTH2_CALLBACK_ENDPOINT)
-        async def handle_oauth2_callback(session_id: str, actor_id: str = None):
-            """Handle the OAuth2 callback from Google after user consent.
-
-            Google redirects here with a session_id parameter. We call
-            AgentCore Identity to complete the token binding.
-            """
+        async def handle_oauth2_callback(session_id: str):
+            """Handle the OAuth2 callback from Google after user consent."""
             if not session_id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -59,20 +50,13 @@ class GmailOAuth2CallbackServer:
                 )
 
             try:
-                # Complete the OAuth2 flow — this stores the token in the Token Vault
-                # Pass actor_id only if provided in query params
-                if actor_id:
-                    self.identity_client.complete_resource_token_auth(
-                        session_uri=session_id,
-                        user_identifier=actor_id,
-                    )
-                    logger.info(f"[3LO] OAuth2 flow completed for session: {session_id[:20]}... actor: {actor_id}")
-                else:
-                    # Let Identity derive actor_id from session
-                    self.identity_client.complete_resource_token_auth(
-                        session_uri=session_id,
-                    )
-                    logger.info(f"[3LO] OAuth2 flow completed for session: {session_id[:20]}...")
+                # Complete the OAuth2 flow
+                # userIdentifier ties the token to a specific user in the vault
+                self._client.complete_resource_token_auth(
+                    sessionUri=session_id,
+                    userIdentifier={"userId": "demo-user"},
+                )
+                logger.info(f"[3LO] OAuth2 flow completed for session: {session_id[:40]}...")
 
                 html = """
                 <!DOCTYPE html>
