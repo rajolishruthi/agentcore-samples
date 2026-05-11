@@ -76,10 +76,10 @@ def _call_gateway_mcp(gateway_url: str, access_token: str, raw_email: str) -> di
         "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
     }
 
+    # Don't specify returnUrl - let the gateway use its default callback
     _meta = {
         "aws.bedrock-agentcore.gateway/credentialProviderConfiguration": {
             "oauthCredentialProvider": {
-                "returnUrl": GMAIL_CALLBACK_URL,
                 "forceAuthentication": False,
             }
         }
