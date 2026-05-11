@@ -25,8 +25,8 @@ GMAIL_CALLBACK_URL = os.getenv("GMAIL_CALLBACK_URL", "http://localhost:9090/oaut
 GMAIL_GATEWAY_URL = os.getenv("GMAIL_GATEWAY_URL", "")
 
 # M2M provider for authenticating TO the Gateway
-# This is the same provider the monitor agent uses for its Gateway
-GATEWAY_AUTH_PROVIDER = os.getenv("GATEWAY_AUTH_PROVIDER", "GatewayOAuth2Provider-monitor-agent-a2a")
+# Reuse the same provider that monitor agent uses for its Gateway
+GATEWAY_AUTH_PROVIDER = os.getenv("GATEWAY_PROVIDER_NAME", "")
 
 # MCP protocol version that supports URL-mode elicitation
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -42,10 +42,18 @@ def _get_gateway_url() -> str:
     try:
         import boto3
         ssm = boto3.client("ssm")
-        response = ssm.get_parameter(
-            Name="/hostagent/agentcore/gmail-gateway-url", WithDecryption=True
-        )
-        return response["Parameter"]["Value"]
+        # Try Gmail gateway first, fall back to monitor agent gateway
+        try:
+            response = ssm.get_parameter(
+                Name="/hostagent/agentcore/gmail-gateway-url", WithDecryption=True
+            )
+            return response["Parameter"]["Value"]
+        except ssm.exceptions.ParameterNotFound:
+            # Fall back to monitor agent gateway URL
+            response = ssm.get_parameter(
+                Name="/monitoragent/agentcore/gateway/gateway_url", WithDecryption=True
+            )
+            return response["Parameter"]["Value"]
     except Exception as e:
         logger.error(f"Failed to get Gateway URL: {e}")
         raise RuntimeError("Gmail Gateway URL not configured.")
@@ -158,12 +166,18 @@ def send_email_to_user(recipient: str, subject: str, body: str) -> str:
 
     @requires_access_token(
         provider_name=GATEWAY_AUTH_PROVIDER,
-        scopes=["cognito-stack-a2a-resource-server/gateway"],
+        scopes=[],
         auth_flow="M2M",
         into="gateway_token",
         force_authentication=False,
     )
     def _send_via_gateway(gateway_token: str = "") -> str:
+        if not GATEWAY_AUTH_PROVIDER:
+            return json.dumps({
+                "error": True,
+                "message": "GATEWAY_PROVIDER_NAME environment variable not set. Cannot authenticate to Gateway.",
+            })
+
         if not gateway_token:
             return json.dumps({
                 "error": True,
