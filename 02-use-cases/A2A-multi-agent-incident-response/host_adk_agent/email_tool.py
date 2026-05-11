@@ -25,8 +25,8 @@ GMAIL_CALLBACK_URL = os.getenv("GMAIL_CALLBACK_URL", "https://bedrock-agentcore.
 GMAIL_GATEWAY_URL = os.getenv("GMAIL_GATEWAY_URL", "")
 
 # M2M provider for authenticating TO the Gateway
-# Reuse the same provider that monitor agent uses for its Gateway
-GATEWAY_AUTH_PROVIDER = os.getenv("GATEWAY_PROVIDER_NAME", "")
+# Same provider the monitor agent uses for its Gateway
+GATEWAY_AUTH_PROVIDER = os.getenv("GATEWAY_AUTH_PROVIDER", "GatewayOAuth2Provider-monitor-agent-a2a")
 
 # MCP protocol version that supports URL-mode elicitation
 MCP_PROTOCOL_VERSION = "2025-11-25"
