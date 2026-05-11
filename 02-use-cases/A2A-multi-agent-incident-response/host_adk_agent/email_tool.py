@@ -76,10 +76,11 @@ def _call_gateway_mcp(gateway_url: str, access_token: str, raw_email: str) -> di
         "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
     }
 
-    # Don't override returnUrl - let gateway use its configured defaultReturnUrl
+    # Reference the gmail-3lo-provider explicitly
     _meta = {
         "aws.bedrock-agentcore.gateway/credentialProviderConfiguration": {
             "oauthCredentialProvider": {
+                "providerName": GMAIL_PROVIDER_NAME,
                 "forceAuthentication": False,
             }
         }
