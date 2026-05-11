@@ -23,7 +23,9 @@ else:
     from host_adk_agent.email_tool import send_email_tool
 
 # Gmail 3LO is enabled when the provider name is configured
-GMAIL_3LO_ENABLED = bool(os.getenv("GMAIL_PROVIDER_NAME", ""))
+GMAIL_PROVIDER_NAME = os.getenv("GMAIL_PROVIDER_NAME", "")
+GMAIL_3LO_ENABLED = bool(GMAIL_PROVIDER_NAME)
+print(f"DEBUG: GMAIL_PROVIDER_NAME={GMAIL_PROVIDER_NAME}, GMAIL_3LO_ENABLED={GMAIL_3LO_ENABLED}")
 
 
 # AWS and agent configuration
