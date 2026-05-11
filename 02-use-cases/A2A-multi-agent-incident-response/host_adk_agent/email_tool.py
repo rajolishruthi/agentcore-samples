@@ -109,8 +109,25 @@ def _parse_gateway_response(rpc_response: dict) -> str:
     """Parse the Gateway MCP JSON-RPC response."""
     logger.info(f"DEBUG: Parsing gateway response: {json.dumps(rpc_response)[:500]}")
 
+    # Check for elicitation (authorization required) - this is an "error" with elicitations
     if "error" in rpc_response:
         error = rpc_response["error"]
+        error_data = error.get("data", {})
+        elicitations = error_data.get("elicitations", [])
+
+        # If there are elicitations, extract the authorization URL
+        if elicitations:
+            for elicitation in elicitations:
+                if elicitation.get("mode") == "url":
+                    auth_url = elicitation.get("url", "")
+                    logger.info(f"DEBUG: Found authorization URL: {auth_url}")
+                    return json.dumps({
+                        "auth_required": True,
+                        "authorization_url": auth_url,
+                        "message": f"Gmail authorization is required. Please visit this URL to grant access:\n\n{auth_url}\n\nAfter authorizing, try sending the email again.",
+                    })
+
+        # Otherwise it's a regular error
         logger.error(f"DEBUG: Gateway returned error: {error}")
         return json.dumps({
             "error": True,
