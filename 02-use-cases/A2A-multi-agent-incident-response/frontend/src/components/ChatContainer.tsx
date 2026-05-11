@@ -61,6 +61,47 @@ export function ChatContainer({ user }: ChatContainerProps) {
     )
   }
 
+  // Detect OAuth consent URLs in the latest assistant message and auto-open popup
+  useEffect(() => {
+    if (isStreaming || messages.length === 0) return
+
+    const lastMessage = messages[messages.length - 1]
+    if (lastMessage.role !== 'assistant') return
+
+    const content = lastMessage.content || ''
+    // Detect AgentCore Identity authorization URLs
+    const authUrlMatch = content.match(
+      /https:\/\/bedrock-agentcore\.[^/]+\.amazonaws\.com\/identities\/oauth2\/authorize\?[^\s"'<)]+/
+    )
+
+    if (authUrlMatch) {
+      const authUrl = authUrlMatch[0]
+      console.log('[3LO] Detected consent URL, opening popup:', authUrl)
+
+      // Open in popup
+      const popup = window.open(authUrl, 'gmail_consent', 'width=600,height=700,left=200,top=100')
+
+      if (popup) {
+        // Poll until popup closes
+        const interval = setInterval(() => {
+          if (popup.closed) {
+            clearInterval(interval)
+            console.log('[3LO] Consent popup closed, auto-retrying last user message...')
+
+            // Find the last user message and re-send it
+            const lastUserMessage = [...messages].reverse().find(m => m.role === 'user')
+            if (lastUserMessage && accessToken && user) {
+              // Small delay to let the token vault propagate
+              setTimeout(() => {
+                sendMessage(lastUserMessage.content, accessToken, user.username)
+              }, 2000)
+            }
+          }
+        }, 1000)
+      }
+    }
+  }, [messages, isStreaming])
+
   if (initializationError) {
     return (
       <div className="flex-1 flex items-center justify-center">
