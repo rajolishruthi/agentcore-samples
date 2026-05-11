@@ -1,10 +1,15 @@
-"""Gmail send-email tool using AgentCore Gateway MCP.
+"""Gmail 3LO send-email tool using @requires_access_token on Runtime.
 
-Uses the same auth pattern as the host agent's A2A calls to monitor/websearch agents:
-- @requires_access_token with M2M flow to get a Cognito JWT
-- Uses that JWT as Bearer token to call the Gateway MCP endpoint
+Pattern from tutorial 12-m2m-3lo-runtime:
+- Uses @requires_access_token(auth_flow="USER_FEDERATION") to get Gmail token
+- First call: returns consent URL (non-blocking via TokenPoller)
+- After consent: token is cached in vault, subsequent calls send directly
 
-The Gateway handles the Gmail 3LO (consent, token vault, injection) transparently.
+Prerequisites:
+1. Gmail credential provider registered in AgentCore Identity (GoogleOauth2)
+2. GMAIL_PROVIDER_NAME env var set (enables the tool)
+3. CALLBACK_URL env var set to the OAuth2 callback endpoint
+4. OAuth2 callback server running locally to handle session binding
 """
 
 import base64
@@ -15,227 +20,107 @@ from email.mime.text import MIMEText
 
 import httpx
 from bedrock_agentcore.identity.auth import requires_access_token
+from bedrock_agentcore.services.identity import TokenPoller
 from google.adk.tools import FunctionTool
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 GMAIL_PROVIDER_NAME = os.getenv("GMAIL_PROVIDER_NAME", "gmail-3lo-provider")
-GMAIL_CALLBACK_URL = os.getenv("GMAIL_CALLBACK_URL", "https://bedrock-agentcore.us-west-2.amazonaws.com/identities/oauth2/callback/3d7be228-daa8-413a-be07-6d9578fe90fa")
-GMAIL_GATEWAY_URL = os.getenv("GMAIL_GATEWAY_URL", "")
+CALLBACK_URL = os.getenv("CALLBACK_URL", "http://localhost:9090/oauth2/callback")
 
-# M2M provider for authenticating TO the Gateway
-# Same provider the monitor agent uses for its Gateway
-GATEWAY_AUTH_PROVIDER = os.getenv("GATEWAY_AUTH_PROVIDER", "GatewayOAuth2Provider-monitor-agent-a2a")
+# Gmail API scope
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
-# MCP protocol version that supports URL-mode elicitation
-MCP_PROTOCOL_VERSION = "2025-11-25"
-
-# Gateway MCP tool name (derived from target name + operationId)
-GATEWAY_TOOL_NAME = "GmailSend___sendEmail"
+# Cache for auth URL (shown to user when consent needed)
+_gmail_auth_url_cache: dict = {}
 
 
-def _get_gateway_url() -> str:
-    """Get the Gateway MCP endpoint URL from env var or SSM."""
-    if GMAIL_GATEWAY_URL:
-        return GMAIL_GATEWAY_URL
-    try:
-        import boto3
-        ssm = boto3.client("ssm")
-        # Try Gmail gateway first, fall back to monitor agent gateway
-        try:
-            response = ssm.get_parameter(
-                Name="/hostagent/agentcore/gmail-gateway-url", WithDecryption=True
-            )
-            return response["Parameter"]["Value"]
-        except ssm.exceptions.ParameterNotFound:
-            # Fall back to monitor agent gateway URL
-            response = ssm.get_parameter(
-                Name="/monitoragent/agentcore/gateway/gateway_url", WithDecryption=True
-            )
-            return response["Parameter"]["Value"]
-    except Exception as e:
-        logger.error(f"Failed to get Gateway URL: {e}")
-        raise RuntimeError("Gmail Gateway URL not configured.")
+class _NonBlockingPoller(TokenPoller):
+    """Returns immediately so the consent URL can be passed to the user.
+
+    On first call (no token yet): on_auth_url is called with the URL, then
+    this poller returns "" immediately instead of blocking.
+    On second invocation (after user completes consent): token is returned directly.
+    """
+    async def poll_for_token(self) -> str:
+        return ""
 
 
-def _compose_raw_email(recipient: str, subject: str, body: str) -> str:
-    """Compose an RFC 2822 email and return base64url-encoded string."""
-    content_type = "html" if "<" in body else "plain"
-    message = MIMEText(body, content_type)
-    message["to"] = recipient
-    message["subject"] = subject
-    return base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
-
-
-def _call_gateway_mcp(gateway_url: str, access_token: str, raw_email: str) -> dict:
-    """Make a JSON-RPC tools/call request to the Gateway MCP endpoint."""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {access_token}",
-        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-    }
-
-    # Let gateway use its configured credential provider (no metadata override)
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": GATEWAY_TOOL_NAME,
-            "arguments": {"raw": raw_email},
-        },
-    }
-
-    logger.info(f"DEBUG: Calling gateway at {gateway_url}")
-    with httpx.Client(timeout=120.0) as client:
-        response = client.post(gateway_url, headers=headers, json=payload)
-        logger.info(f"DEBUG: Gateway response status: {response.status_code}")
-        logger.info(f"DEBUG: Gateway response body: {response.text[:500]}")
-        response.raise_for_status()
-        return response.json()
-
-
-def _parse_gateway_response(rpc_response: dict) -> str:
-    """Parse the Gateway MCP JSON-RPC response."""
-    logger.info(f"DEBUG: Parsing gateway response: {json.dumps(rpc_response)[:500]}")
-
-    # Check for elicitation (authorization required) - this is an "error" with elicitations
-    if "error" in rpc_response:
-        error = rpc_response["error"]
-        error_data = error.get("data", {})
-        elicitations = error_data.get("elicitations", [])
-
-        # If there are elicitations, extract the authorization URL
-        if elicitations:
-            for elicitation in elicitations:
-                if elicitation.get("mode") == "url":
-                    auth_url = elicitation.get("url", "")
-                    logger.info(f"DEBUG: Found authorization URL: {auth_url}")
-                    return json.dumps({
-                        "auth_required": True,
-                        "authorization_url": auth_url,
-                        "message": f"Gmail authorization is required. Please visit this URL to grant access:\n\n{auth_url}\n\nAfter authorizing, try sending the email again.",
-                    })
-
-        # Otherwise it's a regular error
-        logger.error(f"DEBUG: Gateway returned error: {error}")
-        return json.dumps({
-            "error": True,
-            "message": f"Gateway error: {error.get('message', 'Unknown error')}",
-        })
-
-    result = rpc_response.get("result", {})
-    content_items = result.get("content", [])
-    logger.info(f"DEBUG: Found {len(content_items)} content items")
-
-    for item in content_items:
-        if item.get("type") == "resource":
-            resource = item.get("resource", {})
-            text = resource.get("text", "")
-            uri = resource.get("uri", "")
-            if "elicitation" in uri or "accounts.google.com" in text:
-                return json.dumps({
-                    "auth_required": True,
-                    "authorization_url": text,
-                    "message": (
-                        "Gmail authorization is required. "
-                        "Please visit this URL to grant access, then try again:\n\n"
-                        f"{text}"
-                    ),
-                })
-
-        if item.get("type") == "text":
-            text = item.get("text", "")
-            try:
-                gmail_result = json.loads(text)
-                message_id = gmail_result.get("id", "unknown")
-                return json.dumps({
-                    "success": True,
-                    "message_id": message_id,
-                    "message": f"Email sent successfully. Message ID: {message_id}",
-                })
-            except json.JSONDecodeError:
-                return json.dumps({"success": True, "message": text})
-
-    return json.dumps({
-        "error": True,
-        "message": f"Unexpected Gateway response: {json.dumps(result)}",
-    })
+def _on_gmail_auth_url(url: str) -> None:
+    """Callback when Gmail consent is required."""
+    _gmail_auth_url_cache["url"] = url
+    logger.info(f"[3LO] Gmail authorization URL generated")
 
 
 def send_email_to_user(recipient: str, subject: str, body: str) -> str:
     """Send an email with incident findings or recommendations via Gmail.
 
-    Uses AgentCore Gateway with 3-Legged OAuth. First call returns a consent URL.
-    After authorization, subsequent calls send emails directly.
+    Uses 3-Legged OAuth (Authorization Code Grant) to send emails on behalf
+    of the authenticated user. First call returns a consent URL. After the
+    user authorizes, subsequent calls send emails directly.
 
     Args:
-        recipient: Email address to send to
+        recipient: Email address to send to (e.g., user's Gmail)
         subject: Email subject line
         body: Email body with findings/recommendations
 
     Returns:
-        JSON string with success, auth_required, or error information.
+        A message with success confirmation, or an authorization URL if consent is needed.
     """
 
     @requires_access_token(
-        provider_name=GATEWAY_AUTH_PROVIDER,
-        scopes=[],
-        auth_flow="M2M",
-        into="gateway_token",
-        force_authentication=False,
+        provider_name=GMAIL_PROVIDER_NAME,
+        auth_flow="USER_FEDERATION",
+        scopes=GMAIL_SCOPES,
+        on_auth_url=_on_gmail_auth_url,
+        callback_url=CALLBACK_URL,
+        token_poller=_NonBlockingPoller(),
     )
-    def _send_via_gateway(gateway_token: str = "") -> str:
+    def _send_email(access_token: str = "") -> str:
+        # No token yet — consent required
+        if not access_token:
+            auth_url = _gmail_auth_url_cache.get("url", "")
+            if auth_url:
+                return (
+                    f"Gmail authorization required to send emails on your behalf. "
+                    f"Please visit this URL and grant access:\n\n{auth_url}\n\n"
+                    "After authorizing, ask me to send the email again."
+                )
+            return "Gmail authorization required. Please try again in a moment."
+
+        # Token available — compose and send email
+        content_type = "html" if "<" in body else "plain"
+        message = MIMEText(body, content_type)
+        message["to"] = recipient
+        message["subject"] = subject
+        raw_email = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+
         try:
-            if not GATEWAY_AUTH_PROVIDER:
-                return json.dumps({
-                    "error": True,
-                    "message": "GATEWAY_PROVIDER_NAME environment variable not set. Cannot authenticate to Gateway.",
-                })
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"raw": raw_email},
+                )
+                response.raise_for_status()
+                result = response.json()
+                msg_id = result.get("id", "unknown")
+                logger.info(f"[3LO] Email sent successfully. Message ID: {msg_id}")
+                return f"Email sent successfully to {recipient}. Message ID: {msg_id}"
 
-            if not gateway_token:
-                return json.dumps({
-                    "error": True,
-                    "message": "Unable to obtain Gateway access token.",
-                })
-
-            try:
-                gateway_url = _get_gateway_url()
-            except RuntimeError as e:
-                return json.dumps({"error": True, "message": str(e)})
-
-            raw_email = _compose_raw_email(recipient, subject, body)
-
-            try:
-                rpc_response = _call_gateway_mcp(gateway_url, gateway_token, raw_email)
-            except httpx.HTTPStatusError as e:
-                error_detail = e.response.text if e.response else str(e)
-                return json.dumps({
-                    "error": True,
-                    "message": f"Email service error ({e.response.status_code}): {error_detail}",
-                })
-            except (httpx.ConnectError, httpx.TimeoutException):
-                return json.dumps({
-                    "error": True,
-                    "message": "Email service temporarily unavailable.",
-                })
-            except Exception as e:
-                return json.dumps({
-                    "error": True,
-                    "message": f"Failed to send email: {str(e)}",
-                })
-
-            return _parse_gateway_response(rpc_response)
-
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.text if e.response else str(e)
+            logger.error(f"[3LO] Gmail API error: {e.response.status_code} - {error_detail}")
+            return f"Failed to send email: {e.response.status_code} - {error_detail}"
         except Exception as e:
-            logger.error(f"Unexpected error in email tool: {e}", exc_info=True)
-            return json.dumps({
-                "error": True,
-                "message": f"Unexpected error: {str(e)}",
-            })
+            logger.error(f"[3LO] Error sending email: {e}")
+            return f"Failed to send email: {str(e)}"
 
-    return _send_via_gateway()
+    return _send_email()
 
 
 # Create the ADK FunctionTool for use in the agent
