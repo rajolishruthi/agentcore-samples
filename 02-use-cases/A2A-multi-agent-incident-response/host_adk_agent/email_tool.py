@@ -172,45 +172,53 @@ def send_email_to_user(recipient: str, subject: str, body: str) -> str:
         force_authentication=False,
     )
     def _send_via_gateway(gateway_token: str = "") -> str:
-        if not GATEWAY_AUTH_PROVIDER:
-            return json.dumps({
-                "error": True,
-                "message": "GATEWAY_PROVIDER_NAME environment variable not set. Cannot authenticate to Gateway.",
-            })
-
-        if not gateway_token:
-            return json.dumps({
-                "error": True,
-                "message": "Unable to obtain Gateway access token.",
-            })
-
         try:
-            gateway_url = _get_gateway_url()
-        except RuntimeError as e:
-            return json.dumps({"error": True, "message": str(e)})
+            if not GATEWAY_AUTH_PROVIDER:
+                return json.dumps({
+                    "error": True,
+                    "message": "GATEWAY_PROVIDER_NAME environment variable not set. Cannot authenticate to Gateway.",
+                })
 
-        raw_email = _compose_raw_email(recipient, subject, body)
+            if not gateway_token:
+                return json.dumps({
+                    "error": True,
+                    "message": "Unable to obtain Gateway access token.",
+                })
 
-        try:
-            rpc_response = _call_gateway_mcp(gateway_url, gateway_token, raw_email)
-        except httpx.HTTPStatusError as e:
-            error_detail = e.response.text if e.response else str(e)
-            return json.dumps({
-                "error": True,
-                "message": f"Email service error ({e.response.status_code}): {error_detail}",
-            })
-        except (httpx.ConnectError, httpx.TimeoutException):
-            return json.dumps({
-                "error": True,
-                "message": "Email service temporarily unavailable.",
-            })
+            try:
+                gateway_url = _get_gateway_url()
+            except RuntimeError as e:
+                return json.dumps({"error": True, "message": str(e)})
+
+            raw_email = _compose_raw_email(recipient, subject, body)
+
+            try:
+                rpc_response = _call_gateway_mcp(gateway_url, gateway_token, raw_email)
+            except httpx.HTTPStatusError as e:
+                error_detail = e.response.text if e.response else str(e)
+                return json.dumps({
+                    "error": True,
+                    "message": f"Email service error ({e.response.status_code}): {error_detail}",
+                })
+            except (httpx.ConnectError, httpx.TimeoutException):
+                return json.dumps({
+                    "error": True,
+                    "message": "Email service temporarily unavailable.",
+                })
+            except Exception as e:
+                return json.dumps({
+                    "error": True,
+                    "message": f"Failed to send email: {str(e)}",
+                })
+
+            return _parse_gateway_response(rpc_response)
+
         except Exception as e:
+            logger.error(f"Unexpected error in email tool: {e}", exc_info=True)
             return json.dumps({
                 "error": True,
-                "message": f"Failed to send email: {str(e)}",
+                "message": f"Unexpected error: {str(e)}",
             })
-
-        return _parse_gateway_response(rpc_response)
 
     return _send_via_gateway()
 
