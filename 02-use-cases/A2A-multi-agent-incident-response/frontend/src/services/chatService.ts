@@ -1,5 +1,26 @@
 import type { StreamingEvent } from '../types'
 
+// OAuth2 callback server URL (for 3LO session binding)
+const OAUTH2_CALLBACK_SERVER_URL = 'http://localhost:9090'
+
+/**
+ * Store the user's bearer token in the OAuth2 callback server for 3LO session binding.
+ * This must be called before invoking the agent so that when Google redirects back
+ * after consent, the callback server can associate the OAuth session with this user.
+ */
+async function storeTokenInCallbackServer(bearerToken: string): Promise<void> {
+  try {
+    await fetch(`${OAUTH2_CALLBACK_SERVER_URL}/userIdentifier/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_token: bearerToken }),
+    })
+  } catch (error) {
+    // Callback server might not be running — that's OK for non-3LO flows
+    console.debug('[CHAT_SERVICE] OAuth2 callback server not reachable (3LO disabled):', error)
+  }
+}
+
 /**
  * Decode JWT token and extract the "sub" claim
  */
@@ -52,6 +73,9 @@ export async function* invokeAgentStream(
   })
 
   try {
+    // Store bearer token in callback server for 3LO session binding
+    await storeTokenInCallbackServer(bearerToken)
+
     const response = await fetch(url + '?qualifier=DEFAULT', {
       method: 'POST',
       headers: headers,
