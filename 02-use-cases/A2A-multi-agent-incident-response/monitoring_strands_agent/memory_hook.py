@@ -48,55 +48,63 @@ class MonitoringMemoryHooks(HookProvider):
     def retrieve_monitoring_context(self, event: MessageAddedEvent):
         """Retrieve long-term monitoring context before processing queries"""
         messages = event.agent.messages
-        if (
-            messages[-1]["role"] == "user"
-            and "toolResult" not in messages[-1]["content"][0]
-        ):
-            user_query = messages[-1]["content"][0]["text"]
+        if not messages:
+            return
+        last = messages[-1]
+        if last.get("role") != "user":
+            return
+        content = last.get("content") or []
+        if not content or not isinstance(content[0], dict):
+            return
+        if "toolResult" in content[0]:
+            return
+        user_query = content[0].get("text")
+        if not user_query:
+            return
 
-            try:
-                # Search across different long-term memory namespaces
-                relevant_memories = []
+        try:
+            # Search across different long-term memory namespaces
+            relevant_memories = []
 
-                for namespace_template, config in self.retrieval_config.items():
-                    # Resolve namespace template with actual actor ID
-                    resolved_namespace = namespace_template.format(
-                        actorId=self.actor_id
-                    )
+            for namespace_template, config in self.retrieval_config.items():
+                # Resolve namespace template with actual actor ID
+                resolved_namespace = namespace_template.format(
+                    actorId=self.actor_id
+                )
 
-                    # Retrieve memories from this namespace
-                    memories = self.client.retrieve_memories(
-                        memory_id=self.memory_id,
-                        namespace=resolved_namespace,
-                        query=user_query,
-                        top_k=config.top_k,
-                    )
+                # Retrieve memories from this namespace
+                memories = self.client.retrieve_memories(
+                    memory_id=self.memory_id,
+                    namespace=resolved_namespace,
+                    query=user_query,
+                    top_k=config.top_k,
+                )
 
-                    # Filter by relevance score
-                    filtered_memories = [
-                        memory
-                        for memory in memories
-                        if memory.get("score", 0) >= config.relevance_score
-                    ]
+                # Filter by relevance score
+                filtered_memories = [
+                    memory
+                    for memory in memories
+                    if memory.get("score", 0) >= config.relevance_score
+                ]
 
-                    relevant_memories.extend(filtered_memories)
-                    logger.info(
-                        f"Found {len(filtered_memories)} relevant memories in {resolved_namespace}"
-                    )
+                relevant_memories.extend(filtered_memories)
+                logger.info(
+                    f"Found {len(filtered_memories)} relevant memories in {resolved_namespace}"
+                )
 
-                # Inject context into agent's system prompt if memories found
-                if relevant_memories:
-                    context_text = self._format_context(relevant_memories)
-                    original_prompt = event.agent.system_prompt
-                    enhanced_prompt = f"{original_prompt}\n\n<memory-context>\n{context_text}\n</memory-context>\n"
+            # Inject context into agent's system prompt if memories found
+            if relevant_memories:
+                context_text = self._format_context(relevant_memories)
+                original_prompt = event.agent.system_prompt
+                enhanced_prompt = f"{original_prompt}\n\n<memory-context>\n{context_text}\n</memory-context>\n"
 
-                    event.agent.system_prompt = enhanced_prompt
-                    logger.info(
-                        f"✅ Injected {len(relevant_memories)} long-term memories into agent context"
-                    )
+                event.agent.system_prompt = enhanced_prompt
+                logger.info(
+                    f"✅ Injected {len(relevant_memories)} long-term memories into agent context"
+                )
 
-            except Exception as e:
-                logger.error(f"Failed to retrieve monitoring context: {e}")
+        except Exception as e:
+            logger.error(f"Failed to retrieve monitoring context: {e}")
 
     def _format_context(self, memories: List[Dict]) -> str:
         """Format retrieved long-term memories for agent context"""
@@ -122,15 +130,19 @@ class MonitoringMemoryHooks(HookProvider):
                 agent_response = None
 
                 for msg in reversed(messages):
+                    content = msg.get("content") or []
+                    if not content or not isinstance(content[0], dict):
+                        continue
                     if msg["role"] == "assistant" and not agent_response:
-                        agent_response = msg["content"][0]["text"]
+                        agent_response = content[0].get("text")
                     elif (
                         msg["role"] == "user"
                         and not user_query
-                        and "toolResult" not in msg["content"][0]
+                        and "toolResult" not in content[0]
                     ):
-                        user_query = msg["content"][0]["text"]
-                        break
+                        user_query = content[0].get("text")
+                        if user_query:
+                            break
 
                 if user_query and agent_response:
                     # Save to short-term conversational memory using create_event
