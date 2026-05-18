@@ -5,12 +5,11 @@ import type { Message } from '../types'
 import { ToolUseBlockComponent } from './ToolUseBlock'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import strandsIcon from '../icons/strands.png'
-import openaiSdkIcon from '../icons/openaisdk.png'
 
 // Map agent names to their icons
 const agentIcons: Record<string, string> = {
   'monitor_agent': strandsIcon,
-  'websearch_agent': openaiSdkIcon,
+  'websearch_agent': strandsIcon,
 }
 
 interface ChatMessageProps {
