@@ -59,7 +59,6 @@ class MonitoringAgent:
     def invoke(self, query: str, session_id: str):
         try:
             response = str(self.agent(query))
-
         except Exception as e:
-            raise f"Error invoking agent: {e}"
+            raise RuntimeError(f"Error invoking agent: {e}") from e
         return response
