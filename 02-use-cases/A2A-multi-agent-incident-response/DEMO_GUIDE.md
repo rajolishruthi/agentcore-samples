@@ -189,9 +189,9 @@ AuthorizerConfiguration:
 
 | Component | Framework | Runs On | Model | Auth |
 |---|---|---|---|---|
-| Host Agent | Google ADK | AgentCore Runtime | Gemini 2.5 Flash | AgentCore Identity (outbound) |
-| Monitoring Agent | Strands SDK | AgentCore Runtime | Claude Sonnet (Bedrock) | AgentCore Runtime JWT Authorizer (inbound) |
-| Web Search Agent | Strands SDK | GCP Cloud Run | Claude Sonnet (Bedrock) | Cognito JWT middleware (inbound) |
+| Host Agent | Google ADK | AgentCore Runtime | Claude Sonnet 4 (Bedrock via LiteLLM) | AgentCore Identity (outbound) |
+| Monitoring Agent | Strands SDK | AgentCore Runtime | Claude Sonnet 4.5 (Bedrock) | AgentCore Runtime JWT Authorizer (inbound) |
+| Web Search Agent | Strands SDK | GCP Cloud Run | Gemini 2.5 Flash (Google AI) | AgentCore Identity (GetWorkloadAccessTokenForJWT) |
 | Identity Provider | Cognito | AWS | — | Trust anchor for all agents |
 | Tool Access | MCP Gateway | AWS | — | OAuth2 via workload identity |
 | Memory | AgentCore Memory | AWS | — | IAM / workload identity |
