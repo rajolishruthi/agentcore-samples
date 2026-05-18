@@ -56,7 +56,7 @@ def _create_client_factory(provider_name: str, session_id: str, actor_id: str):
             scopes=[],
             auth_flow="M2M",
             into="bearer_token",
-            force_authentication=True,
+            force_authentication=False,
         )
         def _create_client(bearer_token: str = str()) -> httpx.AsyncClient:
             headers = {
