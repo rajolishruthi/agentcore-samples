@@ -137,43 +137,101 @@ echo -n "YOUR_TAVILY_API_KEY" | \
 echo -n "YOUR_MEMORY_ID" | \
   gcloud secrets create memory-id --data-file=-
 
-# AWS credentials for cross-cloud access (Bedrock + Memory)
-echo -n "YOUR_AWS_ACCESS_KEY_ID" | \
-  gcloud secrets create aws-access-key-id --data-file=-
-
-echo -n "YOUR_AWS_SECRET_ACCESS_KEY" | \
-  gcloud secrets create aws-secret-access-key --data-file=-
+# Google API key (for Gemini model)
+echo -n "YOUR_GOOGLE_API_KEY" | \
+  gcloud secrets create GOOGLE_API_KEY --data-file=-
 ```
 
-### 3c. Build and deploy
+### 3c. Set up OIDC for cross-cloud AWS access (no static credentials)
+
+Instead of storing long-lived AWS access keys, we use [GCP Workload Identity Federation](https://aws.amazon.com/blogs/security/access-aws-using-a-google-cloud-platform-native-workload-identity/) to get temporary AWS credentials via OIDC.
+
+```bash
+# Get your GCP service account's numeric unique ID
+SA_NUMERIC_ID=$(gcloud iam service-accounts describe \
+  $(gcloud config get-value account) \
+  --format='value(uniqueId)')
+echo "Service Account Numeric ID: $SA_NUMERIC_ID"
+```
+
+**On AWS** — Create an IAM OIDC provider and role:
+
+```bash
+# Create OIDC provider for Google (if not already exists)
+aws iam create-open-id-connect-provider \
+  --url https://accounts.google.com \
+  --client-id-list "$SA_NUMERIC_ID" "sts.amazonaws.com" \
+  --thumbprint-list "08745487e891c19e3078c1f2a07e452950ef36f6"
+
+# Create the IAM role with trust policy
+# Note: Google token field mapping:
+#   accounts.google.com:aud  → token's azp (service account numeric ID)
+#   accounts.google.com:oaud → token's aud (requested audience)
+#   accounts.google.com:sub  → token's sub (service account numeric ID)
+cat > /tmp/trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Federated": "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):oidc-provider/accounts.google.com"},
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "accounts.google.com:aud": "$SA_NUMERIC_ID",
+        "accounts.google.com:oaud": "sts.amazonaws.com",
+        "accounts.google.com:sub": "$SA_NUMERIC_ID"
+      }
+    }
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name GCPWebSearchAgentRole \
+  --assume-role-policy-document file:///tmp/trust-policy.json
+
+# Attach permissions (AgentCore Identity + Memory)
+aws iam put-role-policy \
+  --role-name GCPWebSearchAgentRole \
+  --policy-name BedrockAgentCoreAccess \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:*",
+      "Resource": "*"
+    }]
+  }'
+```
+
+### 3d. Build and deploy
 
 ```bash
 # From the project root
 cd web_search_strands_agent/
 
-# Build container image
-gcloud builds submit --tag gcr.io/$GCP_PROJECT/web-search-strands-agent
-
-# Deploy to Cloud Run
+# Deploy to Cloud Run (builds from source)
 gcloud run deploy web-search-strands-agent \
-  --image gcr.io/$GCP_PROJECT/web-search-strands-agent \
+  --source . \
   --region $GCP_REGION \
   --allow-unauthenticated \
   --set-env-vars "\
-COGNITO_REGION=us-west-2,\
-MCP_REGION=us-west-2,\
-MODEL_ID=global.anthropic.claude-sonnet-4-20250514-v1:0" \
+SERVICE_URL=https://web-search-strands-agent-$(gcloud projects describe $GCP_PROJECT --format='value(projectNumber)').${GCP_REGION}.run.app,\
+MODEL_ID=gemini/gemini-2.5-flash,\
+AWS_REGION=us-west-2,\
+AGENTCORE_WORKLOAD_NAME=web-search-agent,\
+AWS_ROLE_ARN=arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/GCPWebSearchAgentRole,\
+MCP_REGION=us-west-2" \
   --set-secrets "\
 COGNITO_USER_POOL_ID=cognito-user-pool-id:latest,\
 TAVILY_API_KEY=tavily-api-key:latest,\
 MEMORY_ID=memory-id:latest,\
-AWS_ACCESS_KEY_ID=aws-access-key-id:latest,\
-AWS_SECRET_ACCESS_KEY=aws-secret-access-key:latest" \
+GOOGLE_API_KEY=GOOGLE_API_KEY:latest" \
   --memory 1Gi \
   --timeout 300
 ```
 
-### 3d. Get the Cloud Run URL
+### 3e. Get the Cloud Run URL
 
 ```bash
 WEBSEARCH_GCP_URL=$(gcloud run services describe web-search-strands-agent \
@@ -181,7 +239,7 @@ WEBSEARCH_GCP_URL=$(gcloud run services describe web-search-strands-agent \
 echo "WebSearch GCP URL: $WEBSEARCH_GCP_URL"
 ```
 
-### 3e. Verify the deployment
+### 3f. Verify the deployment
 
 ```bash
 # Test agent card (no auth needed)
@@ -290,6 +348,5 @@ gcloud run services delete web-search-strands-agent --region $GCP_REGION
 gcloud secrets delete cognito-user-pool-id
 gcloud secrets delete tavily-api-key
 gcloud secrets delete memory-id
-gcloud secrets delete aws-access-key-id
-gcloud secrets delete aws-secret-access-key
+gcloud secrets delete GOOGLE_API_KEY
 ```
