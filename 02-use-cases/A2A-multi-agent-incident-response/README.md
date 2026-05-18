@@ -1,6 +1,14 @@
-# Agent-to-Agent (A2A) Multi-Agent System on Amazon Bedrock AgentCore for Incident Response Logging
+# Agent-to-Agent (A2A) Multi-Agent System on Amazon Bedrock AgentCore for Incident Response
 
-A comprehensive implementation of the [Agent-to-Agent (A2A)](https://a2a-protocol.org/latest/) protocol using specialized agents running on [Amazon Bedrock `AgentCore` runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-a2a.html), demonstrating intelligent coordination for AWS infrastructure monitoring and operations management. This repository walks you through setting up three core agents to answer questions about incidents and metrics in your AWS accounts and search for best remediation strategies. A monitoring agent (built using the [`Strands` Agents SDK](https://strandsagents.com/latest/)) is responsible for handling all questions related to metrics and logs within AWS and cross AWS accounts. A remediation agent (built using [`OpenAI`'s Agents SDK](https://openai.github.io/openai-agents-python/)) is responsible to doing efficient web searches for best remediation strategies and optimization techniques that the user can ask for. Both agents run on separate runtimes as `A2A` servers and utilize all `AgentCore` primitives - memory for context management, observability for deep level analysis about both agents, gateway for access to tools (`Cloudwatch`, `JIRA` and `TAVILY` APIs) and `AgentCore` identity for enabling inbound and outbound access into the agent and then into the resources that the agent can access using OAuth 2.0 and APIs. These two agents are then managed by a host [`Google ADK` agent](https://google.github.io/adk-docs/) that acts as a client and delegates tasks to each of these agents using A2A on Runtime. The Google ADK host agent runs on a separate `AgentCore` runtime of its own.
+A multi-cloud implementation of the [Agent-to-Agent (A2A)](https://a2a-protocol.org/latest/) protocol using specialized agents running across [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-a2a.html) and GCP Cloud Run, demonstrating intelligent coordination for AWS infrastructure monitoring and incident response.
+
+The system consists of three agents:
+
+- **Host Agent** ([Google ADK](https://google.github.io/adk-docs/)) — Orchestrates incident response by delegating to specialist agents. Runs on AgentCore Runtime with Claude Sonnet 4 via Amazon Bedrock (LiteLLM). Also handles Gmail 3LO (send email with findings on behalf of the user).
+- **Monitoring Agent** ([Strands Agents SDK](https://strandsagents.com/latest/)) — Queries CloudWatch logs, metrics, and alarms via AgentCore Gateway (MCP). Runs on AgentCore Runtime with Claude Sonnet 4.5 via Amazon Bedrock.
+- **Web Search Agent** ([Strands Agents SDK](https://strandsagents.com/latest/)) — Searches the web for AWS documentation, best practices, and remediation strategies using Tavily. Runs on GCP Cloud Run with Gemini 2.5 Flash.
+
+All agents communicate via the A2A protocol (JSON-RPC 2.0) and use AgentCore Identity for zero-trust authentication across cloud boundaries. A single Cognito User Pool serves as the trust anchor for M2M tokens, with AgentCore Identity handling token vaulting, JWT validation, and 3LO (Authorization Code Grant) flows.
 
 ## Demo
 
@@ -14,11 +22,63 @@ A comprehensive implementation of the [Agent-to-Agent (A2A)](https://a2a-protoco
 > **Default Models**
 >
 > This solution uses the following AI models by default:
-> - **Host Agent (Google ADK)**: `gemini-2.5-flash`
-> - **Monitoring Agent (Strands)**: `global.anthropic.claude-sonnet-4-5-20250929-v1:0` (Amazon Bedrock)
-> - **Web Search Agent (OpenAI)**: `gpt-4o-2024-08-06`
+> - **Host Agent (Google ADK on AgentCore Runtime)**: `global.anthropic.claude-sonnet-4-20250514-v1:0` (Amazon Bedrock via LiteLLM)
+> - **Monitoring Agent (Strands on AgentCore Runtime)**: `global.anthropic.claude-sonnet-4-5-20250929-v1:0` (Amazon Bedrock)
+> - **Web Search Agent (Strands on GCP Cloud Run)**: `gemini/gemini-2.5-flash` (Google AI via LiteLLM)
 >
 > These models can be customized during deployment. The deployment script will prompt you to specify different model IDs if needed.
+
+## AgentCore Identity: Zero-Trust for the Agent Era
+
+This project demonstrates how **Amazon Bedrock AgentCore Identity** provides a zero-trust security model for multi-agent systems that span cloud boundaries. The network topology is irrelevant. The identity is everything.
+
+### The Problem
+
+Multi-agent systems don't live in a single AWS account or a single cloud. They span organizational boundaries — your agents talk to your partner's agents. They span cloud providers — your Bedrock-hosted agent may need to invoke a tool running on another cloud or on-premises. Traditional network-level trust (VPC peering, VPNs, IP whitelisting) is antithetical to zero-trust.
+
+### The Solution: Identity-Based Trust
+
+AgentCore Identity provides a unified trust fabric that works across these boundaries using **identity-based trust assertions that can be verified anywhere**. An agent in AWS can authenticate to a service on GCP without sharing credentials, without network adjacency, and without implicit trust. The receiving service verifies the agent's identity, checks the authorization policy, and makes a real-time access decision.
+
+### How This Project Demonstrates It
+
+This project has three agents across **two clouds** with a single identity provider (Cognito) as the trust anchor:
+
+```
+                    Cognito User Pool (Trust Anchor)
+                    ┌──────────────────────────┐
+                    │  Issues M2M JWT tokens    │
+                    │  JWKS public keys are     │
+                    │  verifiable anywhere       │
+                    └─────────┬────────────────┘
+                              │
+              ┌───────────────┼───────────────────┐
+              │               │                   │
+     AWS AgentCore       AWS AgentCore         GCP Cloud Run
+     Runtime             Runtime               (no AgentCore)
+  ┌──────────────┐   ┌──────────────────┐   ┌──────────────────┐
+  │ Host Agent   │   │ Monitoring Agent │   │ WebSearch Agent  │
+  │              │   │                  │   │                  │
+  │ Outbound:    │   │ Inbound:         │   │ Inbound:         │
+  │ AgentCore    │   │ AgentCore        │   │ Cognito JWT      │
+  │ Identity     │   │ Runtime auto-    │   │ validation       │
+  │ fetches      │   │ validates JWT    │   │ (auth_middleware) │
+  │ Cognito M2M  │   │ via Authorizer   │   │                  │
+  │ tokens from  │   │ Config           │   │ Same trust model │
+  │ token vault  │   │                  │   │ different runtime │
+  └──────────────┘   └──────────────────┘   └──────────────────┘
+```
+
+**Four layers of zero-trust identity in action:**
+
+| Layer | What | Where in Code |
+|---|---|---|
+| **1. Token Vaulting** | AgentCore Identity securely stores Cognito client credentials and fetches M2M tokens on demand. The host agent never handles raw secrets. | `host_adk_agent/agent.py` — `@requires_access_token` decorator |
+| **2. Inbound Auth (AWS)** | AgentCore Runtime validates incoming JWTs automatically before agent code runs. Configured via `CustomJWTAuthorizer` with allowed client lists. | `cloudformation/monitoring_agent.yaml` — `AuthorizerConfiguration` |
+| **3. Inbound Auth (Cross-Cloud)** | On GCP where AgentCore Runtime isn't available, `GetWorkloadAccessTokenForJWT` validates the incoming Cognito JWT via AgentCore Identity — same trust model, different compute. | `web_search_strands_agent/agentcore_identity_auth.py` |
+| **4. Outbound Auth (Tools)** | The monitoring agent uses its workload identity token to obtain gateway credentials for CloudWatch access — no static credentials stored in code. | `monitoring_strands_agent/utils.py` — `get_resource_oauth2_token` |
+
+**The key insight**: Whether an agent runs on AWS AgentCore Runtime or GCP Cloud Run, the trust model is the same — cryptographically verifiable JWT tokens issued by a central identity provider. The infrastructure layer changes, but the identity verification is consistent. No VPC peering. No shared secrets. No network-level trust. Just identity.
 
 ## What is A2A?
 
@@ -66,11 +126,15 @@ A comprehensive implementation of the [Agent-to-Agent (A2A)](https://a2a-protoco
 4. **uv**: Install uv package manager using [guide](https://docs.astral.sh/uv/getting-started/installation/)
 
 5. **API Keys**: You'll need the following API keys (the deployment script will prompt for these):
-   - **OpenAI API Key**: Get from [OpenAI Platform](https://platform.openai.com/api-keys)
-   - **Tavily API Key**: Get from [Tavily](https://tavily.com/)
-   - **Google API Key**: Get from [Google AI Studio](https://aistudio.google.com/app/apikey)
+   - **Google API Key**: Get from [Google AI Studio](https://aistudio.google.com/app/apikey) (for Gemini on the web search agent)
+   - **Tavily API Key**: Get from [Tavily](https://tavily.com/) (for web search)
 
-   > **Note**: Make sure your OpenAI and Google account has credits if you are using paid models.
+   > **Note**: Make sure your Google account has credits if you are using paid models.
+
+6. **Gmail 3LO (Optional)**: To enable the "email findings" feature:
+   - **Google OAuth Client ID + Secret**: Get from [Google Cloud Console](https://console.developers.google.com/) (OAuth 2.0 credentials, Web application type)
+   - Enable the **Gmail API** in your Google Cloud project
+   - Add test users in the OAuth consent screen
 
 6. **Supported Regions**: This solution is currently tested and supported in the following AWS regions:
 

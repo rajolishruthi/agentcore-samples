@@ -70,24 +70,17 @@ class MonitoringAgentExecutor(AgentExecutor):
         accumulated_text = ""
 
         try:
-            # Use the agent's stream method
             async for event in agent.stream(user_message, session_id):
-                # Check if task was cancelled
                 if not self._active_tasks.get(task_id, False):
                     logger.info(f"Task {task_id} was cancelled during streaming")
                     return
 
-                # Handle error events
-                if "error" in event:
-                    error_msg = event.get("content", "Unknown error")
-                    logger.error(f"Error in stream: {error_msg}")
-                    raise Exception(error_msg)
+                if event.get("error"):
+                    raise Exception(event.get("content", "Unknown error"))
 
-                # Stream content updates
                 content = event.get("content", "")
-                if content and not event.get("is_task_complete", False):
+                if content:
                     accumulated_text += content
-                    # Send incremental update
                     await updater.update_status(
                         TaskState.working,
                         new_agent_text_message(
@@ -97,13 +90,11 @@ class MonitoringAgentExecutor(AgentExecutor):
                         ),
                     )
 
-            # Add final result as artifact
             if accumulated_text:
                 await updater.add_artifact(
                     [Part(root=TextPart(text=accumulated_text))],
                     name="agent_response",
                 )
-
             await updater.complete()
 
         except Exception as e:

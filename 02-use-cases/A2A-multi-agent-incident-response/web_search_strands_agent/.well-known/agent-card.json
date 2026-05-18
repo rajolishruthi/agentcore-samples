@@ -1,0 +1,37 @@
+{
+  "name": "WebSearch Agent",
+  "description": "Web search agent that provides AWS documentation and solutions by searching for relevant information (hosted on GCP Cloud Run)",
+  "url": "https://web-search-strands-agent-4yomlxfjiq-uc.a.run.app",
+  "version": "0.3.0",
+  "protocolVersion": "0.2.0",
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "skills": [
+    {
+      "id": "websearch",
+      "name": "Web Search",
+      "description": "Search the web using Tavily API for AWS documentation, troubleshooting guides, and solutions",
+      "tags": ["websearch", "aws", "documentation", "solutions", "tavily"],
+      "examples": [
+        "Find documentation for fixing high CPU usage in EC2",
+        "Search for solutions to RDS connection timeout issues",
+        "What are the best practices for AWS Lambda cold starts?"
+      ]
+    },
+    {
+      "id": "aws-documentation",
+      "name": "AWS Documentation Search",
+      "description": "Search and retrieve AWS documentation and best practices",
+      "tags": ["aws", "documentation", "search", "best-practices"],
+      "examples": [
+        "Search for AWS CloudWatch best practices",
+        "Find AWS troubleshooting guides for ECS services"
+      ]
+    }
+  ]
+}

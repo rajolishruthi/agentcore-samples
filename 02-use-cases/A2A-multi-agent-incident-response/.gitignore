@@ -226,3 +226,19 @@ temp.txt
 .a2a.config
 # frontend/package-lock.json
 .a2a copy.config
+
+
+# Secrets and credentials (NEVER commit these)
+*.secret
+cognito_config.json
+frontend/.env
+frontend/.env.local
+host_adk_agent/.env
+web_search_strands_agent/.env
+monitoring_strands_agent/.env
+
+# Node modules
+node_modules/
+
+# Lock files (optional - users regenerate)
+uv.lock

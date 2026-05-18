@@ -1,36 +1,24 @@
-"""A2A Server for the Strands-based Web Search Agent — GCP Cloud Run version.
+"""A2A Server for the Strands-based Web Search Agent — with AgentCore Identity.
 
-Uses OIDC (GCP Workload Identity Federation) for AWS credentials.
-No static AWS keys needed — temporary credentials obtained at startup.
+SIMPLE CHANGE: Replaced CognitoAuthMiddleware with AgentCoreIdentityMiddleware.
+Everything else stays the same.
 """
 
-import os
-import logging
-import uvicorn
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 from agent_executor import WebSearchAgentExecutor
-from agentcore_identity_auth import AgentCoreIdentityMiddleware
+from agentcore_identity_auth import AgentCoreIdentityMiddleware  # ← CHANGED: Was CognitoAuthMiddleware
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+import logging
+import os
+import uvicorn
 
-# --- OIDC: Get temporary AWS credentials from GCP identity token ---
-from aws_credentials import get_aws_session
-
-_session = get_aws_session()
-_creds = _session.get_credentials().get_frozen_credentials()
-os.environ["AWS_ACCESS_KEY_ID"] = _creds.access_key
-os.environ["AWS_SECRET_ACCESS_KEY"] = _creds.secret_key
-if _creds.token:
-    os.environ["AWS_SESSION_TOKEN"] = _creds.token
-print("[STARTUP] ✅ AWS credentials obtained via OIDC")
-
-# --- Server setup ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# On GCP Cloud Run, the URL is the Cloud Run service URL
 runtime_url = os.getenv("SERVICE_URL", "http://127.0.0.1:9000/")
 host, port = "0.0.0.0", int(os.getenv("PORT", "9000"))
 
@@ -69,22 +57,32 @@ agent_card = AgentCard(
     ],
 )
 
+# Create request handler with Strands-based executor
 request_handler = DefaultRequestHandler(
     agent_executor=WebSearchAgentExecutor(), task_store=InMemoryTaskStore()
 )
 
+# Create A2A server
 server = A2AStarletteApplication(agent_card=agent_card, http_handler=request_handler)
+
+# Build the app
 app = server.build()
-app.add_middleware(AgentCoreIdentityMiddleware)
+
+# Add AgentCore Identity middleware (replaces custom Cognito validation)
+app.add_middleware(AgentCoreIdentityMiddleware)  # ← CHANGED: Was CognitoAuthMiddleware
 
 
 async def ping(request):
+    """Health check endpoint"""
     return JSONResponse({"status": "healthy"})
 
 
+from starlette.routing import Route
 app.routes.append(Route("/ping", endpoint=ping, methods=["GET"]))
 
-logger.info("✅ A2A Server configured (Strands on GCP Cloud Run)")
+
+logger.info("✅ A2A Server configured (Strands + AgentCore Identity on GCP)")
+logger.info(f"📍 Server URL: {runtime_url}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host=host, port=port)

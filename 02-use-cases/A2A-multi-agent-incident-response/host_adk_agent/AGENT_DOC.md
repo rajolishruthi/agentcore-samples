@@ -6,8 +6,9 @@ The Host Agent is the **orchestrator** of the multi-agent system. It receives us
 
 - Built with **Google ADK** (Agent Development Kit)
 - Runs on **AWS Bedrock AgentCore Runtime**
-- Uses **Gemini 2.5 Flash** (default) or a Bedrock model via LiteLlm
+- Uses **Claude Sonnet 4** on Amazon Bedrock via LiteLLM (default: `global.anthropic.claude-sonnet-4-20250514-v1:0`)
 - Communicates with sub-agents via the **A2A protocol** (Agent-to-Agent)
+- Sends emails on behalf of users via **Gmail 3LO** (Authorization Code Grant with AgentCore Identity)
 
 ## Architecture Position
 
@@ -93,7 +94,11 @@ For troubleshooting requests, the orchestration strategy is:
 
 ## Tools
 
-None. The host agent has **no direct tools**. It delegates everything to sub-agents via A2A.
+| Tool | Purpose |
+|---|---|
+| `send_email_to_user` | Send findings/recommendations via Gmail (3LO — user consent required on first use) |
+
+The email tool uses `@requires_access_token(auth_flow="USER_FEDERATION")` with AgentCore Identity. First call returns a consent URL; after user authorizes, subsequent calls send emails directly using the cached token from the Token Vault.
 
 ## Memory
 

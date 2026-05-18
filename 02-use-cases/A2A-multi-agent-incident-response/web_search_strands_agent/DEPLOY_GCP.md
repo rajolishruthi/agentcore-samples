@@ -5,13 +5,19 @@
 ```
 AWS AgentCore Runtime                    GCP Cloud Run
 ┌─────────────────────┐                 ┌──────────────────────────┐
-│ Host Agent (ADK)    │──A2A + Cognito──│ WebSearch Agent (Strands)│
-│ Monitoring Agent    │   M2M token     │ + Cognito JWT validation │
+│ ORc Agent (ADK)    │──A2A + Cognito──│ WebSearch Agent (Strands)│
+│ Monitoring Agent  (Strands)  │   M2M token     │ + Cognito JWT validation │
 │                     │                 │ + Tavily web search      │
 │ Cognito User Pool   │                 │ + AgentCore Memory (AWS) │
-│ AgentCore Identity  │                 └──────────────────────────┘
+│ AgentCore Identity
+  Agentcore Memory            └──────────────────────────┘
 └─────────────────────┘
 ```
+** Websearch change the LLMs ( Gcp change it to Gemini flash )
+** ORchestrator agent to Claude
+** First start with walking through the Architecture 
+** Looking into GCP agent invocations in agentcore
+
 
 ## Prerequisites
 
@@ -123,8 +129,14 @@ curl -X POST $SERVICE_URL/ \
 
 ## Auth Flow Summary
 
-1. Host Agent (AWS) fetches Cognito M2M token directly (no AgentCore Identity)
+1. Host Agent (AWS) fetches Cognito M2M token via AgentCore Identity (`@requires_access_token` with token vaulting)
 2. Host Agent calls GCP Cloud Run URL with Bearer token
 3. GCP Cloud Run middleware validates JWT against Cognito JWKS
 4. Request reaches the Strands A2A agent
 5. Agent uses Bedrock (via AWS creds) for LLM + AgentCore Memory
+
+M2M - M2M = Machine-to-Machine. It's a token that lets one system talk to another system — without any human being involved
+
+Regular token (User-delegated / 3LO): A human user logs in, clicks "Allow", and the agent acts on behalf of that user.
+
+M2M token (Client Credentials / 2LO): No human logs in. The agent itself proves its own identity directly to another service and gets a token.

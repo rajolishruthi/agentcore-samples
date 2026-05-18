@@ -37,7 +37,7 @@ class WebSearchAgentExecutor(AgentExecutor):
             logger.info("Creating Strands web search agent...")
             memory_id = os.getenv("MEMORY_ID")
             model_id = os.getenv(
-                "MODEL_ID", "global.anthropic.claude-sonnet-4-20250514-v1:0"
+                "MODEL_ID", "gemini/gemini-2.5-flash"
             )
             region_name = os.getenv("MCP_REGION")
 
@@ -68,11 +68,11 @@ class WebSearchAgentExecutor(AgentExecutor):
                     logger.info(f"Task {task_id} was cancelled")
                     return
 
-                if "error" in event:
+                if event.get("error"):
                     raise Exception(event.get("content", "Unknown error"))
 
                 content = event.get("content", "")
-                if content and not event.get("is_task_complete", False):
+                if content:
                     accumulated_text += content
                     await updater.update_status(
                         TaskState.working,

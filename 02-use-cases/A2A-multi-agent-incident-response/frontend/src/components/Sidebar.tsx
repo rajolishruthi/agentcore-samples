@@ -1,6 +1,5 @@
 import { useChat } from '../hooks/useChat'
 import strandsIcon from '../icons/strands.png'
-import openaiSdkIcon from '../icons/openaisdk.png'
 
 interface SidebarProps {
   signOut: () => void
@@ -12,7 +11,7 @@ export function Sidebar({ signOut }: SidebarProps) {
   // Map agent names to their icons
   const agentIcons: Record<string, string> = {
     'monitor_agent': strandsIcon,
-    'websearch_agent': openaiSdkIcon,
+    'websearch_agent': strandsIcon,
   };
 
   return (

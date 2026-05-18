@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 from strands import Agent
-from strands.models import BedrockModel
+from strands.models.litellm import LiteLLMModel
 from prompt import SYSTEM_PROMPT
 from tools import web_search, get_memory_tools
 
@@ -19,7 +19,7 @@ load_dotenv(dotenv_path=env_path)
 
 logger = logging.getLogger(__name__)
 
-MODEL_ID = os.getenv("MODEL_ID", "global.anthropic.claude-sonnet-4-20250514-v1:0")
+MODEL_ID = os.getenv("MODEL_ID", "gemini/gemini-2.5-flash")
 MEMORY_ID = os.getenv("MEMORY_ID")
 MCP_REGION = os.getenv("MCP_REGION")
 
@@ -42,7 +42,7 @@ class WebSearchAgent:
         actor_id: str,
         session_id: str,
     ):
-        bedrock_model = BedrockModel(model_id=model_id, region_name=region_name)
+        gemini_model = LiteLLMModel(model_id=model_id)
 
         # Build tool list: web_search + memory tools
         memory_tools = get_memory_tools(
@@ -54,33 +54,24 @@ class WebSearchAgent:
             name="WebSearch Agent",
             description="Web search agent for finding AWS solutions, documentation, and best practices",
             system_prompt=SYSTEM_PROMPT,
-            model=bedrock_model,
+            model=gemini_model,
             tools=all_tools,
         )
 
     async def stream(self, query: str, session_id: str):
         """Stream agent response, yielding chunks compatible with A2A executor."""
-        response = ""
         try:
             async for event in self.agent.stream_async(query):
                 if "data" in event:
-                    response += event["data"]
                     yield {
-                        "is_task_complete": "complete" in event,
+                        "is_task_complete": False,
                         "require_user_input": False,
                         "content": event["data"],
                     }
         except Exception as e:
             yield {
-                "is_task_complete": False,
-                "require_user_input": True,
+                "error": True,
                 "content": f"Unable to process request. Error: {e}",
-            }
-        finally:
-            yield {
-                "is_task_complete": True,
-                "require_user_input": False,
-                "content": response,
             }
 
     def invoke(self, query: str, session_id: str) -> str:
