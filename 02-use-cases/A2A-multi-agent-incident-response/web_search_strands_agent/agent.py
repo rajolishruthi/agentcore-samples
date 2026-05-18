@@ -21,12 +21,9 @@ logger = logging.getLogger(__name__)
 
 MODEL_ID = os.getenv("MODEL_ID", "gemini/gemini-2.5-flash")
 MEMORY_ID = os.getenv("MEMORY_ID")
-MCP_REGION = os.getenv("MCP_REGION")
 
 if not MEMORY_ID:
     raise RuntimeError("Missing MEMORY_ID environment variable")
-if not MCP_REGION:
-    raise RuntimeError("Missing MCP_REGION environment variable")
 
 
 class WebSearchAgent:
@@ -38,7 +35,6 @@ class WebSearchAgent:
         self,
         memory_id: str,
         model_id: str,
-        region_name: str,
         actor_id: str,
         session_id: str,
     ):

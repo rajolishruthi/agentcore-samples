@@ -39,17 +39,13 @@ class WebSearchAgentExecutor(AgentExecutor):
             model_id = os.getenv(
                 "MODEL_ID", "gemini/gemini-2.5-flash"
             )
-            region_name = os.getenv("MCP_REGION")
 
-            if not memory_id or not region_name:
-                raise RuntimeError(
-                    "Missing required env vars: MEMORY_ID or MCP_REGION"
-                )
+            if not memory_id:
+                raise RuntimeError("Missing required env var: MEMORY_ID")
 
             self._agent = WebSearchAgent(
                 memory_id=memory_id,
                 model_id=model_id,
-                region_name=region_name,
                 actor_id=actor_id,
                 session_id=session_id,
             )
