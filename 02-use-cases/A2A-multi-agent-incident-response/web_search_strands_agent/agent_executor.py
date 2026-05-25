@@ -16,6 +16,8 @@ from a2a.types import (
 )
 from a2a.utils import new_agent_text_message, new_task
 from a2a.utils.errors import ServerError
+from opentelemetry import baggage
+from opentelemetry import context as otel_context
 from agent import WebSearchAgent
 import os
 import logging
@@ -113,6 +115,10 @@ class WebSearchAgentExecutor(AgentExecutor):
         if not session_id:
             logger.error("Session ID is not set")
             raise ServerError(error=InvalidParamsError())
+
+        # Set session ID in OTEL baggage for trace correlation in CloudWatch
+        otel_ctx = baggage.set_baggage("session.id", session_id)
+        otel_context.attach(otel_ctx)
 
         task = context.current_task
         if not task:

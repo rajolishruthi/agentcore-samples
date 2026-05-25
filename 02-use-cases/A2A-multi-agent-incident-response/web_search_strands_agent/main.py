@@ -1,7 +1,7 @@
 """A2A Server for the Strands-based Web Search Agent — GCP Cloud Run version.
 
 Uses OIDC (GCP Workload Identity Federation) for AWS credentials.
-No static AWS keys needed — temporary credentials obtained at startup.
+Credentials are set by entrypoint.sh before this module loads.
 """
 
 import os
@@ -15,17 +15,6 @@ from agent_executor import WebSearchAgentExecutor
 from agentcore_identity_auth import AgentCoreIdentityMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-
-# --- OIDC: Get temporary AWS credentials from GCP identity token ---
-from aws_credentials import get_aws_session
-
-_session = get_aws_session()
-_creds = _session.get_credentials().get_frozen_credentials()
-os.environ["AWS_ACCESS_KEY_ID"] = _creds.access_key
-os.environ["AWS_SECRET_ACCESS_KEY"] = _creds.secret_key
-if _creds.token:
-    os.environ["AWS_SESSION_TOKEN"] = _creds.token
-print("[STARTUP] ✅ AWS credentials obtained via OIDC")
 
 # --- Server setup ---
 logging.basicConfig(level=logging.INFO)
