@@ -10,9 +10,11 @@ from a2a.types import (
 )
 from a2a.utils import new_agent_text_message, new_task
 from a2a.utils.errors import ServerError
+import json
 import logging
 import os
 from agent import MonitoringAgent
+from obo_claims import decode_user_identity
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,7 @@ class MonitoringAgentExecutor(AgentExecutor):
         updater: TaskUpdater,
         task_id: str,
         session_id: str,
+        on_behalf_of: dict | None = None,
     ) -> None:
         """Execute agent with streaming and update task status incrementally."""
         accumulated_text = ""
@@ -90,9 +93,20 @@ class MonitoringAgentExecutor(AgentExecutor):
                         ),
                     )
 
+            # Add final result as artifact, with OBO audit metadata if present.
             if accumulated_text:
+                final_text = accumulated_text
+                if on_behalf_of:
+                    audit = {
+                        "_audit": {
+                            "on_behalf_of": on_behalf_of.get("email"),
+                            "role": on_behalf_of.get("role"),
+                            "agent": "monitor_agent",
+                        }
+                    }
+                    final_text = f"{accumulated_text}\n\n<!--AUDIT:{json.dumps(audit)}-->"
                 await updater.add_artifact(
-                    [Part(root=TextPart(text=accumulated_text))],
+                    [Part(root=TextPart(text=final_text))],
                     name="agent_response",
                 )
             await updater.complete()
@@ -113,6 +127,7 @@ class MonitoringAgentExecutor(AgentExecutor):
         session_id = None
         actor_id = None
         workload_token = None
+        bearer_token = None
 
         if context.call_context:
             headers = context.call_context.state.get("headers", {})
@@ -120,6 +135,18 @@ class MonitoringAgentExecutor(AgentExecutor):
             actor_id = headers.get("x-amzn-bedrock-agentcore-runtime-custom-actorid")
             workload_token = headers.get(
                 "x-amzn-bedrock-agentcore-runtime-workload-accesstoken"
+            )
+            auth_header = headers.get("authorization") or headers.get("Authorization") or ""
+            if auth_header.lower().startswith("bearer "):
+                bearer_token = auth_header[7:]
+
+        # Decode OBO claim to attribute the action to a real user.
+        on_behalf_of = decode_user_identity(bearer_token)
+        if on_behalf_of:
+            logger.info(
+                "[OBO] acting on behalf of user=%s role=%s",
+                on_behalf_of.get("email"),
+                on_behalf_of.get("role"),
             )
 
         if not actor_id:
@@ -164,7 +191,7 @@ class MonitoringAgentExecutor(AgentExecutor):
             # Execute the agent
             logger.info("Calling agent...")
             await self._execute_streaming(
-                agent, user_message, updater, task_id, session_id
+                agent, user_message, updater, task_id, session_id, on_behalf_of
             )
 
             logger.info(f"Task {task_id} completed successfully")

@@ -64,6 +64,8 @@ request_handler = DefaultRequestHandler(
 
 server = A2AStarletteApplication(agent_card=agent_card, http_handler=request_handler)
 app = server.build()
+
+# Add AgentCore Identity OAuth middleware (replaces custom Cognito JWT validation)
 app.add_middleware(AgentCoreIdentityMiddleware)
 
 

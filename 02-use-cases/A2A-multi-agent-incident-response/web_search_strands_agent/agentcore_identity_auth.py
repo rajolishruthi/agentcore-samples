@@ -6,6 +6,7 @@ Uses OIDC-based AWS credentials (no static keys).
 
 import os
 import logging
+from obo_claims import decode_user_identity
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -45,6 +46,17 @@ class AgentCoreIdentityMiddleware(BaseHTTPMiddleware):
                 userToken=bearer_token,
             )
             request.state.workload_access_token = response["workloadAccessToken"]
+
+            # Decode the original incoming bearer to read the onBehalfOf claim
+            # (the workload access token is a different token without it).
+            on_behalf_of = decode_user_identity(bearer_token)
+            if on_behalf_of:
+                request.state.user_on_behalf_of = on_behalf_of
+                logger.info(
+                    "[OBO] acting on behalf of user=%s role=%s",
+                    on_behalf_of.get("email"),
+                    on_behalf_of.get("role"),
+                )
             return await call_next(request)
         except Exception as e:
             logger.error(f"Token validation failed: {e}")

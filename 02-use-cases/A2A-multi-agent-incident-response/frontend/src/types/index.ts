@@ -187,6 +187,12 @@ export type ContentBlock =
   | { type: 'tool'; toolBlock: ToolUseBlock }
   | { type: 'transfer'; agentName: string };
 
+export interface AuditInfo {
+  on_behalf_of: string;
+  role?: string;
+  agent?: string;
+}
+
 // Message types
 export interface Message {
   role: 'user' | 'assistant';
@@ -196,6 +202,7 @@ export interface Message {
   toolBlocks?: ToolUseBlock[];
   contentBlocks?: ContentBlock[]; // Ordered sequence of text and tool blocks
   metadata?: MessageMetadata;
+  audit?: AuditInfo;
 }
 
 export interface TokenResponse {

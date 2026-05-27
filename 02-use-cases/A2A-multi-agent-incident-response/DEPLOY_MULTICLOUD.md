@@ -190,7 +190,9 @@ aws iam create-role \
   --role-name GCPWebSearchAgentRole \
   --assume-role-policy-document file:///tmp/trust-policy.json
 
-# Attach permissions (AgentCore Identity + Memory)
+# Attach least-privilege permissions: only what the agent needs.
+# Scope bedrock:InvokeModel to the foundation models you use, and
+# bedrock-agentcore:CreateEvent/RetrieveMemoryRecords to the memory ARN.
 aws iam put-role-policy \
   --role-name GCPWebSearchAgentRole \
   --policy-name BedrockAgentCoreAccess \
@@ -203,6 +205,8 @@ aws iam put-role-policy \
     }]
   }'
 ```
+
+Result: short-lived AWS credentials per request, automatic refresh, no static secrets.
 
 ### 3d. Build and deploy
 

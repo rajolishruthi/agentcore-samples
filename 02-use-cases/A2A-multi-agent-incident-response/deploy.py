@@ -496,6 +496,32 @@ def collect_deployment_parameters(account_id: str = None) -> Dict[str, Any]:
 
     config["cognito"]["admin_password"] = admin_password if admin_password else ""
 
+    # Demo users for OBO role-based access showcase (optional).
+    print()
+    print_info("Seed demo users (alice/bob/charlie) to showcase OBO role-based access?")
+    print_info("alice→admin, bob→manager, charlie→analyst, anyone else→viewer")
+    seed_default = (
+        existing_config.get("cognito", {}).get("seed_demo_users", "false")
+        if use_existing
+        else "false"
+    )
+    seed_input = get_input(
+        "Seed demo users? (yes/no)",
+        default="yes" if seed_default == "true" else "no",
+        required=True,
+    ).strip().lower()
+    seed_demo_users = seed_input in ("y", "yes", "true")
+    config["cognito"]["seed_demo_users"] = "true" if seed_demo_users else "false"
+
+    if seed_demo_users:
+        demo_password = get_secret(
+            "Shared demo user password (8+ chars, mix of upper/lower/digit/symbol)",
+            required=True,
+        )
+        config["cognito"]["demo_user_password"] = demo_password
+    else:
+        config["cognito"]["demo_user_password"] = ""
+
     # S3 Bucket for Smithy Models with validation
     print_header("S3 Configuration")
     default_bucket = (
@@ -623,6 +649,11 @@ def display_configuration(config: Dict[str, Any]):
         print(f"  Admin User Password: {'*' * 20} (configured)")
     else:
         print("  Admin User Password: (auto-generated temporary password will be sent via email)")
+    if config['cognito'].get('seed_demo_users') == 'true':
+        print("  Demo Users (alice/bob/charlie): seeded for OBO showcase")
+        print(f"  Demo User Password: {'*' * 20} (configured)")
+    else:
+        print("  Demo Users (alice/bob/charlie): not seeded")
 
     print(f"\n{Colors.BOLD}S3 Configuration:{Colors.END}")
     print(f"  Smithy Models Bucket: {config['s3']['smithy_models_bucket']}")
@@ -875,6 +906,14 @@ def deploy_cognito_stack(config: Dict[str, Any]) -> bool:
         parameters.append(
             f"ParameterKey=AdminUserPassword,ParameterValue={config['cognito']['admin_password']}"
         )
+
+    # Optional demo user seeding for OBO showcase.
+    if config['cognito'].get('seed_demo_users') == 'true':
+        parameters.append("ParameterKey=SeedDemoUsers,ParameterValue=true")
+        if config['cognito'].get('demo_user_password'):
+            parameters.append(
+                f"ParameterKey=DemoUserPassword,ParameterValue={config['cognito']['demo_user_password']}"
+            )
 
     return deploy_stack(
         stack_name=config["stacks"]["cognito"],

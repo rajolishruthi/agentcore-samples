@@ -77,8 +77,37 @@ This project has three agents across **two clouds** with a single identity provi
 | **2. Inbound Auth (AWS)** | AgentCore Runtime validates incoming JWTs automatically before agent code runs. Configured via `CustomJWTAuthorizer` with allowed client lists. | `cloudformation/monitoring_agent.yaml` — `AuthorizerConfiguration` |
 | **3. Inbound Auth (Cross-Cloud)** | On GCP where AgentCore Runtime isn't available, `GetWorkloadAccessTokenForJWT` validates the incoming Cognito JWT via AgentCore Identity — same trust model, different compute. | `web_search_strands_agent/agentcore_identity_auth.py` |
 | **4. Outbound Auth (Tools)** | The monitoring agent uses its workload identity token to obtain gateway credentials for CloudWatch access — no static credentials stored in code. | `monitoring_strands_agent/utils.py` — `get_resource_oauth2_token` |
+| **5. Delegated User Identity (OBO)** | The host agent exchanges its M2M token *with* the user's JWT attached so downstream agents see who the action is for. Each downstream agent reads `onBehalfOf` from the inbound token and applies role-based policy. | `host_adk_agent/obo_token.py`, `monitoring_strands_agent/obo_claims.py`, `web_search_strands_agent/obo_claims.py` |
 
 **The key insight**: Whether an agent runs on AWS AgentCore Runtime or GCP Cloud Run, the trust model is the same — cryptographically verifiable JWT tokens issued by a central identity provider. The infrastructure layer changes, but the identity verification is consistent. No VPC peering. No shared secrets. No network-level trust. Just identity.
+
+### Delegated User Identity (On-Behalf-Of)
+
+Multi-agent systems hit a common problem: the agent that finally does the work has lost the user's identity. The downstream call is M2M, so audit logs say "the agent did it" instead of "the agent did it on behalf of alice@demo.com." We fix that with a Cognito-native OBO flow.
+
+**Mechanism.** The host agent does not call `OAuth2CredentialProvider` directly. It calls `POST /oauth2/token` on the Cognito domain with `grant_type=client_credentials` plus an `aws_client_metadata` body field carrying the user's JWT:
+
+```
+aws_client_metadata = {
+  "onBehalfOfToken": "<incoming user JWT>",
+  "callerApp": "host-agent"
+}
+```
+
+A Pre-Token-Generation v3 Lambda fires on Cognito's token issuance, decodes the user JWT from `clientMetadata.onBehalfOfToken`, and returns a custom `onBehalfOf` claim under `claimsAndScopeOverrideDetails.accessTokenGeneration.claimsToAddOrOverride`. The agent's M2M token now carries the user's identity. Downstream agents read it from the inbound bearer (no extra hop, no extra IdP) and apply role-based policy: `alice→admin`, `bob→manager`, `charlie→analyst`, default→`viewer`.
+
+**Why not AgentCore Identity's `ON_BEHALF_OF_TOKEN_EXCHANGE`?** That API requires an OAuth2 IdP that implements RFC 8693 token exchange or RFC 7523 §2.1 JWT bearer grant. Cognito implements neither. The supported out-of-the-box OBO providers are Microsoft Entra ID and any custom RFC-compliant IdP. We use Cognito's Pre-Token-Generation feature to achieve the same outcome on the existing identity provider — Cognito-native delegated identity.
+
+**Trust boundary.** The user JWT itself never leaves the host agent. Only the host's exchanged M2M token (with the `onBehalfOf` claim, signed by Cognito) flows downstream. Downstream agents trust the claim because AgentCore Runtime / `GetWorkloadAccessTokenForJWT` already validated the token signature.
+
+| Code | Purpose |
+|---|---|
+| `cloudformation/lambdas/pre_token_gen.py` | Pre-Token-Gen v3 handler that copies user identity into `onBehalfOf` |
+| `host_adk_agent/obo_token.py` | Async OBO token exchanger with single-flight cache |
+| `host_adk_agent/agent.py` — `_OBOAuth(httpx.Auth)` | Per-request bearer injection for outbound A2A calls |
+| `monitoring_strands_agent/obo_claims.py` | Role map + CloudWatch result filtering by role |
+| `web_search_strands_agent/obo_claims.py` | Decode `onBehalfOf` from inbound bearer for audit logging |
+| `frontend/src/components/ChatMessage.tsx` | "On behalf of: alice@demo.com (admin)" badge per agent response |
 
 ## What is A2A?
 

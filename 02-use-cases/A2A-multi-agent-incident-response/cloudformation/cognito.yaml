@@ -19,14 +19,28 @@ Parameters:
     NoEcho: true
     Description: 'Optional: Admin user password (leave empty for auto-generated temporary password)'
 
+  SeedDemoUsers:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: 'Seed alice/bob/charlie demo users to showcase OBO role-based access'
+
+  DemoUserPassword:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: 'Shared password for seeded demo users (alice/bob/charlie). Required when SeedDemoUsers=true.'
+
 Conditions:
   CreateAdminUser: !Not [!Equals [!Ref AdminUserEmail, '']]
+  CreateDemoUsers: !Equals [!Ref SeedDemoUsers, 'true']
 
 
 Resources:
   # Cognito User Pool for M2M Authentication
   M2MUserPool:
     Type: AWS::Cognito::UserPool
+    DependsOn: PreTokenGenInvokePermission
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -45,6 +59,10 @@ Resources:
         RecoveryMechanisms:
           - Name: verified_email
             Priority: 1
+      LambdaConfig:
+        PreTokenGenerationConfig:
+          LambdaArn: !GetAtt PreTokenGenLambda.Arn
+          LambdaVersion: V3_0
       UserPoolTags:
         Name: !Sub '${AWS::StackName}-m2m-pool'
 
@@ -565,6 +583,214 @@ Resources:
       UserEmail: !Ref AdminUserEmail
       UserPassword: !Ref AdminUserPassword
 
+  # Demo users for OBO role-based access showcase.
+  # The role map (alice=admin, bob=manager, charlie=analyst) lives in
+  # monitoring_strands_agent/obo_claims.py.
+  DemoUserAlice:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: CreateDemoUsers
+    DependsOn: M2MUserPool
+    Properties:
+      ServiceToken: !GetAtt UserCreationLambda.Arn
+      UserPoolId: !Ref M2MUserPool
+      UserEmail: 'alice@demo.com'
+      UserPassword: !Ref DemoUserPassword
+
+  DemoUserBob:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: CreateDemoUsers
+    DependsOn: M2MUserPool
+    Properties:
+      ServiceToken: !GetAtt UserCreationLambda.Arn
+      UserPoolId: !Ref M2MUserPool
+      UserEmail: 'bob@demo.com'
+      UserPassword: !Ref DemoUserPassword
+
+  DemoUserCharlie:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: CreateDemoUsers
+    DependsOn: M2MUserPool
+    Properties:
+      ServiceToken: !GetAtt UserCreationLambda.Arn
+      UserPoolId: !Ref M2MUserPool
+      UserEmail: 'charlie@demo.com'
+      UserPassword: !Ref DemoUserPassword
+
+  # ---------------------------------------------------------------------------
+  # OBO (On-Behalf-Of) wiring
+  # ---------------------------------------------------------------------------
+  # The host agent exchanges a user JWT for an M2M token by calling Cognito
+  # /oauth2/token with client_credentials + aws_client_metadata. The Pre-Token-
+  # Generation v3 Lambda copies user identity from the metadata into an
+  # 'onBehalfOf' claim on the issued access token. Downstream agents read that
+  # claim to attribute actions to a real user without needing the user JWT.
+
+  PreTokenGenLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  PreTokenGenLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-pre-token-gen-obo'
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt PreTokenGenLambdaRole.Arn
+      Timeout: 5
+      Code:
+        ZipFile: |
+          import base64
+          import json
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+
+          def _decode_jwt_payload(token):
+              payload = token.split(".")[1]
+              payload += "=" * (-len(payload) % 4)
+              return json.loads(base64.urlsafe_b64decode(payload))
+
+
+          def lambda_handler(event, context):
+              logger.info(f"Trigger source: {event.get('triggerSource')}")
+              metadata = (event.get("request", {}) or {}).get("clientMetadata") or {}
+              on_behalf_of_token = metadata.get("onBehalfOfToken")
+
+              claims = {}
+              if on_behalf_of_token:
+                  try:
+                      user_claims = _decode_jwt_payload(on_behalf_of_token)
+                      on_behalf_of = {
+                          "email": (
+                              user_claims.get("email")
+                              or user_claims.get("username")
+                              or user_claims.get("cognito:username")
+                          ),
+                          "sub": user_claims.get("sub"),
+                          "username": (
+                              user_claims.get("cognito:username")
+                              or user_claims.get("username")
+                          ),
+                      }
+                      claims["onBehalfOf"] = json.dumps(
+                          {k: v for k, v in on_behalf_of.items() if v}
+                      )
+                      claims["callerApp"] = metadata.get("callerApp", "unknown")
+                      logger.info(f"OBO claim added for sub={on_behalf_of.get('sub')}")
+                  except Exception as e:
+                      logger.error(f"Failed to decode onBehalfOfToken: {e}")
+              else:
+                  logger.info("No onBehalfOfToken in clientMetadata; skipping OBO claim")
+
+              event["response"] = {
+                  "claimsAndScopeOverrideDetails": {
+                      "accessTokenGeneration": {
+                          "claimsToAddOrOverride": claims,
+                      }
+                  }
+              }
+              return event
+
+  PreTokenGenInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PreTokenGenLambda.Arn
+      Principal: cognito-idp.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # Agent OBO Client — issues access tokens carrying the onBehalfOf claim.
+  # Separate from MonitoringClient/WebSearchClient so the Pre-Token-Gen
+  # trigger only affects OBO traffic and the existing M2M paths stay
+  # untouched.
+  AgentOBOClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: M2MResourceServer
+    Properties:
+      ClientName: 'agent-obo-client'
+      UserPoolId: !Ref M2MUserPool
+      GenerateSecret: true
+      ExplicitAuthFlows: []
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - !Sub '${AWS::StackName}-resource-server/read'
+        - !Sub '${AWS::StackName}-resource-server/monitoring'
+        - !Sub '${AWS::StackName}-resource-server/websearch'
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      PreventUserExistenceErrors: 'ENABLED'
+
+  AgentOBOClientSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}/agent-obo/client-config'
+      Description: 'Agent OBO Client config (client_id, client_secret, token endpoint)'
+      SecretString: !Sub |
+        {
+          "client_id": "${AgentOBOClient}",
+          "user_pool_id": "${M2MUserPool}",
+          "token_endpoint": "https://${M2MUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/token",
+          "cognito_discovery_url": "https://cognito-idp.${AWS::Region}.amazonaws.com/${M2MUserPool}/.well-known/openid-configuration"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-AgentOBO-ClientSecret'
+
+  AgentOBOClientSecretUpdater:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: AgentOBOClientSecret
+    Properties:
+      ServiceToken: !GetAtt ClientSecretLambda.Arn
+      UserPoolId: !Ref M2MUserPool
+      ClientId: !Ref AgentOBOClient
+      SecretArn: !Ref AgentOBOClientSecret
+      ClientType: AgentOBO
+
+  # SSM Parameters consumed by the host agent runtime
+  AgentOBOClientIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /hostagent/cognito/obo/client-id
+      Type: String
+      Value: !Ref AgentOBOClient
+      Description: 'Cognito client_id used by host agent for OBO token exchange'
+
+  AgentOBOClientSecretArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /hostagent/cognito/obo/client-secret-arn
+      Type: String
+      Value: !Ref AgentOBOClientSecret
+      Description: 'Secrets Manager ARN holding the OBO client_id/client_secret JSON'
+
+  CognitoDomainParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /hostagent/cognito/obo/domain
+      Type: String
+      Value: !Sub '${M2MUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+      Description: 'Cognito user pool domain for /oauth2/token'
+
 Outputs:
   DiscoveryUrl:
     Description: 'OAuth2 Discovery URL for authentication'
@@ -619,3 +845,15 @@ Outputs:
     Value: !Sub '${M2MUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
     Export:
       Name: !Sub '${AWS::StackName}-CognitoDomain'
+
+  AgentOBOClientId:
+    Description: 'Cognito client_id used by host agent for OBO token exchange'
+    Value: !Ref AgentOBOClient
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentOBOClientId'
+
+  AgentOBOClientSecretArn:
+    Description: 'Secrets Manager ARN for the OBO client_secret JSON'
+    Value: !Ref AgentOBOClientSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentOBOClientSecretArn'

@@ -1,7 +1,7 @@
 import { memo, useState } from 'react'
-import { Bot, User, ChevronDown, ChevronRight, Info } from 'lucide-react'
+import { Bot, User, ChevronDown, ChevronRight, Info, UserCheck } from 'lucide-react'
 import { cn, makeUrlsClickable, formatElapsedTime } from '../utils'
-import type { Message } from '../types'
+import type { Message, AuditInfo } from '../types'
 import { ToolUseBlockComponent } from './ToolUseBlock'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import strandsIcon from '../icons/strands.png'
@@ -10,6 +10,25 @@ import strandsIcon from '../icons/strands.png'
 const agentIcons: Record<string, string> = {
   'monitor_agent': strandsIcon,
   'websearch_agent': strandsIcon,
+}
+
+// AUDIT marker emitted by Strands agents: <!--AUDIT:{...json...}-->
+const AUDIT_RE = /<!--AUDIT:(\{.*?\})-->/g
+
+function extractAudit(text: string): { clean: string; audit?: AuditInfo } {
+  let audit: AuditInfo | undefined
+  const clean = text.replace(AUDIT_RE, (_match, payload) => {
+    try {
+      const parsed = JSON.parse(payload)
+      if (parsed && parsed._audit) {
+        audit = parsed._audit as AuditInfo
+      }
+    } catch {
+      // ignore malformed audit blob
+    }
+    return ''
+  }).trim()
+  return { clean, audit }
 }
 
 interface ChatMessageProps {
@@ -22,8 +41,21 @@ export const ChatMessage = memo(function ChatMessage({
   isStreaming = false,
 }: ChatMessageProps) {
   const isUser = message.role === 'user'
-  const contentWithLinks = makeUrlsClickable(message.content)
   const [showMetadata, setShowMetadata] = useState(false)
+
+  // Strip AUDIT markers from any text content and collect the audit info.
+  let collectedAudit: AuditInfo | undefined = message.audit
+  const cleanedBlocks = message.contentBlocks?.map((block) => {
+    if (block.type === 'text') {
+      const { clean, audit } = extractAudit(block.content)
+      if (audit) collectedAudit = audit
+      return { ...block, content: clean }
+    }
+    return block
+  })
+  const { clean: cleanedContent, audit: contentAudit } = extractAudit(message.content)
+  if (contentAudit) collectedAudit = contentAudit
+  const contentWithLinks = makeUrlsClickable(isUser ? message.content : cleanedContent)
 
   return (
     <div
@@ -54,12 +86,23 @@ export const ChatMessage = memo(function ChatMessage({
         </div>
 
         <div className="flex-1 min-w-0">
+          {/* OBO audit badge */}
+          {!isUser && collectedAudit?.on_behalf_of && (
+            <div className="mb-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#1a3a5c] border border-[#298dff] text-xs text-blue-200">
+              <UserCheck className="w-3 h-3" />
+              <span>On behalf of: <span className="font-medium">{collectedAudit.on_behalf_of}</span></span>
+              {collectedAudit.role && (
+                <span className="text-blue-300/70">({collectedAudit.role})</span>
+              )}
+            </div>
+          )}
+
           {/* Always render contentBlocks if available (for ordered display) */}
-          {!isUser && message.contentBlocks && message.contentBlocks.length > 0 && (
+          {!isUser && cleanedBlocks && cleanedBlocks.length > 0 && (
             <div>
-              {message.contentBlocks.map((block, index) => {
+              {cleanedBlocks.map((block, index) => {
                 if (block.type === 'text') {
-                  const isLastBlock = index === message.contentBlocks!.length - 1;
+                  const isLastBlock = index === cleanedBlocks!.length - 1;
                   return (
                     <div
                       key={`text-${index}`}
@@ -107,7 +150,7 @@ export const ChatMessage = memo(function ChatMessage({
           )}
 
           {/* Fallback for user messages or old format */}
-          {(isUser || (!message.contentBlocks || message.contentBlocks.length === 0)) && (
+          {(isUser || (!cleanedBlocks || cleanedBlocks.length === 0)) && (
             <>
               {isUser ? (
                 <div
@@ -119,7 +162,7 @@ export const ChatMessage = memo(function ChatMessage({
                 />
               ) : (
                 <div className={cn("break-words text-sm leading-relaxed", isStreaming && "relative")}>
-                  <MarkdownRenderer content={message.content} />
+                  <MarkdownRenderer content={cleanedContent} />
                 </div>
               )}
 

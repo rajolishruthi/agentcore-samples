@@ -242,3 +242,4 @@ node_modules/
 
 # Lock files (optional - users regenerate)
 uv.lock
+images/

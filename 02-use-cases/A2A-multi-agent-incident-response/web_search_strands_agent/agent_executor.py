@@ -16,11 +16,11 @@ from a2a.types import (
 )
 from a2a.utils import new_agent_text_message, new_task
 from a2a.utils.errors import ServerError
-from opentelemetry import baggage
-from opentelemetry import context as otel_context
 from agent import WebSearchAgent
-import os
+from obo_claims import decode_user_identity
+import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class WebSearchAgentExecutor(AgentExecutor):
 
     async def _execute_streaming(
         self, agent, user_message: str, updater: TaskUpdater,
-        task_id: str, session_id: str,
+        task_id: str, session_id: str, on_behalf_of: dict | None = None,
     ) -> None:
         """Execute agent with streaming and update task status."""
         accumulated_text = ""
@@ -82,8 +82,18 @@ class WebSearchAgentExecutor(AgentExecutor):
                     )
 
             if accumulated_text:
+                final_text = accumulated_text
+                if on_behalf_of:
+                    audit = {
+                        "_audit": {
+                            "on_behalf_of": on_behalf_of.get("email"),
+                            "role": on_behalf_of.get("role"),
+                            "agent": "websearch_agent",
+                        }
+                    }
+                    final_text = f"{accumulated_text}\n\n<!--AUDIT:{json.dumps(audit)}-->"
                 await updater.add_artifact(
-                    [Part(root=TextPart(text=accumulated_text))],
+                    [Part(root=TextPart(text=final_text))],
                     name="agent_response",
                 )
             await updater.complete()
@@ -98,6 +108,7 @@ class WebSearchAgentExecutor(AgentExecutor):
         """Execute the agent for a given A2A request."""
         session_id = None
         actor_id = None
+        bearer_token = None
 
         if context.call_context:
             headers = context.call_context.state.get("headers", {})
@@ -108,6 +119,9 @@ class WebSearchAgentExecutor(AgentExecutor):
             actor_id = headers.get(
                 "x-amzn-bedrock-agentcore-runtime-custom-actorid"
             )
+            auth_header = headers.get("authorization") or headers.get("Authorization") or ""
+            if auth_header.lower().startswith("bearer "):
+                bearer_token = auth_header[7:]
 
         if not actor_id:
             logger.error("Actor ID is not set")
@@ -116,9 +130,13 @@ class WebSearchAgentExecutor(AgentExecutor):
             logger.error("Session ID is not set")
             raise ServerError(error=InvalidParamsError())
 
-        # Set session ID in OTEL baggage for trace correlation in CloudWatch
-        otel_ctx = baggage.set_baggage("session.id", session_id)
-        otel_context.attach(otel_ctx)
+        on_behalf_of = decode_user_identity(bearer_token)
+        if on_behalf_of:
+            logger.info(
+                "[OBO] acting on behalf of user=%s role=%s",
+                on_behalf_of.get("email"),
+                on_behalf_of.get("role"),
+            )
 
         task = context.current_task
         if not task:
@@ -138,7 +156,7 @@ class WebSearchAgentExecutor(AgentExecutor):
             self._active_tasks[task_id] = True
 
             await self._execute_streaming(
-                agent, user_message, updater, task_id, session_id
+                agent, user_message, updater, task_id, session_id, on_behalf_of
             )
             logger.info(f"Task {task_id} completed successfully")
 

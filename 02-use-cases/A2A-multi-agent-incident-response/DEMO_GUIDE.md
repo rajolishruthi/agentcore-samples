@@ -127,7 +127,30 @@ Have these ready in browser tabs:
 
 **Talking point:** "The monitoring agent remembers our previous investigation. It uses AgentCore Memory with two layers — short-term conversation turns that load automatically via hooks, and long-term semantic memory that persists across sessions. If you come back tomorrow and ask about this incident, it'll still have context."
 
-#### Scene 6: Zero-Trust Deep Dive (2 min — if audience is technical)
+#### Scene 6: Delegated User Identity / OBO (3 min)
+
+**Log in as alice@demo.com**, then type:
+
+> "Show me the log groups in my account"
+
+**Then log out, log in as charlie@demo.com**, ask the same question. Then again as the default `viewer`.
+
+**What to point at in the UI:**
+- Each agent response carries a small **"On behalf of: alice@demo.com (admin)"** badge near the avatar
+- Alice (admin) sees every log group; Charlie (analyst) sees only `/aws/lambda/*`; viewer sees none
+- The badge comes from the agent itself — it's an audit assertion, not a frontend guess
+
+**What happens behind the scenes:**
+1. Frontend sends the user's Cognito JWT as Bearer to the host agent
+2. Host agent extracts the JWT and calls Cognito `/oauth2/token` with `aws_client_metadata.onBehalfOfToken=<user JWT>`
+3. A Pre-Token-Gen v3 Lambda fires inside Cognito, decodes the user JWT from the metadata, and stamps an `onBehalfOf` claim onto the agent's M2M access token
+4. Host uses that token as Bearer for the A2A call to monitoring agent
+5. Monitoring agent decodes `onBehalfOf` from its inbound bearer, applies the role map (`alice→admin`, `bob→manager`, `charlie→analyst`, default→`viewer`), and filters CloudWatch results
+6. Audit assertion comes back in the artifact as `<!--AUDIT:{...}-->`, which the frontend strips and renders as the badge
+
+**Talking point:** "Multi-agent systems usually lose user identity at the M2M boundary. The downstream agent sees a workload token and audit logs say 'the agent did it.' We solved that with a Cognito-native OBO flow. AgentCore Identity has an `ON_BEHALF_OF_TOKEN_EXCHANGE` API, but it requires RFC 8693 token exchange — which Cognito doesn't speak. Instead, we use Cognito's Pre-Token-Generation v3 trigger plus `aws_client_metadata` to copy user identity into a custom claim on the agent's M2M token. The user JWT never leaves the host agent. Downstream agents read the claim and apply role-based policy. Same trust model, no second IdP."
+
+#### Scene 7: Zero-Trust Deep Dive (2 min — if audience is technical)
 
 **Show the CloudFormation snippet:**
 
@@ -170,6 +193,17 @@ AuthorizerConfiguration:
 - "Summarize the issues we found in the last investigation"
 - "Is that Lambda error still happening?"
 
+### OBO / Role-Based Queries (log in as different users)
+Demo users (seeded in the same Cognito pool, password set during deploy):
+- `alice@demo.com` → `admin` (sees all log groups)
+- `bob@demo.com` → `manager` (lambda + apigateway)
+- `charlie@demo.com` → `analyst` (lambda only)
+- any other email → `viewer` (no access)
+
+Run the same query as each user to show different results:
+- "Show me the log groups in my account"
+- "List the log streams for /aws/apigateway/access"
+
 ---
 
 ## Troubleshooting During Demo
@@ -193,5 +227,6 @@ AuthorizerConfiguration:
 | Monitoring Agent | Strands SDK | AgentCore Runtime | Claude Sonnet 4.5 (Bedrock) | AgentCore Runtime JWT Authorizer (inbound) |
 | Web Search Agent | Strands SDK | GCP Cloud Run | Gemini 2.5 Flash (Google AI) | AgentCore Identity (GetWorkloadAccessTokenForJWT) |
 | Identity Provider | Cognito | AWS | — | Trust anchor for all agents |
+| Delegated User Identity | Cognito Pre-Token-Gen v3 + `aws_client_metadata` | AWS | — | Stamps `onBehalfOf` claim onto agent M2M token |
 | Tool Access | MCP Gateway | AWS | — | OAuth2 via workload identity |
 | Memory | AgentCore Memory | AWS | — | IAM / workload identity |
