@@ -185,6 +185,27 @@ class MonitoringAgentExecutor(AgentExecutor):
             # Get the agent instance
             agent = await self._get_agent(session_id, actor_id, workload_token)
 
+            # If user has restricted role, instruct the LLM to filter results
+            if on_behalf_of and on_behalf_of.get("role") != "admin":
+                from obo_claims import ROLE_TOOL_FILTERS
+                role = on_behalf_of.get("role", "viewer")
+                prefixes = ROLE_TOOL_FILTERS.get(role, [])
+                if prefixes is None:
+                    pass  # admin, no filter
+                elif not prefixes:
+                    user_message = (
+                        f"[ROLE: {role}] You are restricted from accessing any AWS resources. "
+                        f"Inform the user that their role does not permit access to this data. "
+                        f"Original request: {user_message}"
+                    )
+                else:
+                    allowed = ", ".join(prefixes)
+                    user_message = (
+                        f"[ROLE: {role}] You may ONLY return results where log group names start with: {allowed}. "
+                        f"Filter out all other log groups from your response. "
+                        f"Original request: {user_message}"
+                    )
+
             # Mark task as active
             self._active_tasks[task_id] = True
 
