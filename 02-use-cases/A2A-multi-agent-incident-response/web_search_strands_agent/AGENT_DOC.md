@@ -196,6 +196,8 @@ Memory Flow (tool-driven, not automatic):
 
 Key difference from the monitoring agent: Memory here is **tool-based** (agent explicitly calls tools), while the monitoring agent uses **hooks** (automatic on every message).
 
+> **Important**: The system prompt must instruct the agent to call `save_interaction_to_memory` explicitly when the user asks to save. Marking it as "automatically handled" causes the LLM to skip calling the tool. See `prompt/__init__.py` — the `CRITICAL — Saving to memory` section.
+
 ## Tools Summary
 
 | Tool | Source | Purpose |

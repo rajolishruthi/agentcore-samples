@@ -1,308 +1,265 @@
-# Agent-to-Agent (A2A) Multi-Agent System on Amazon Bedrock AgentCore for Incident Response
+# 🤖 A2A Multi-Agent Incident Response on Amazon Bedrock AgentCore
 
-A multi-cloud implementation of the [Agent-to-Agent (A2A)](https://a2a-protocol.org/latest/) protocol using specialized agents running across [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-a2a.html) and GCP Cloud Run, demonstrating intelligent coordination for AWS infrastructure monitoring and incident response.
+> **Note**: This is an educational sample demonstrating multi-cloud A2A agent orchestration with AgentCore Identity. It is not intended for production use without additional security hardening.
 
-The system consists of three agents:
+A **multi-cloud** implementation of the [Agent-to-Agent (A2A)](https://a2a-protocol.org/latest/) protocol — three specialized agents across AWS and GCP, coordinating in real time to investigate AWS infrastructure incidents, surface remediation steps, and deliver findings by email. A single Cognito User Pool is the trust anchor for all M2M and user-delegated identity across both clouds.
 
-- **Host Agent** ([Google ADK](https://google.github.io/adk-docs/)) — Orchestrates incident response by delegating to specialist agents. Runs on AgentCore Runtime with Claude Sonnet 4 via Amazon Bedrock (LiteLLM). Also handles Gmail 3LO (send email with findings on behalf of the user).
-- **Monitoring Agent** ([Strands Agents SDK](https://strandsagents.com/latest/)) — Queries CloudWatch logs, metrics, and alarms via AgentCore Gateway (MCP). Runs on AgentCore Runtime with Claude Sonnet 4.5 via Amazon Bedrock.
-- **Web Search Agent** ([Strands Agents SDK](https://strandsagents.com/latest/)) — Searches the web for AWS documentation, best practices, and remediation strategies using Tavily. Runs on GCP Cloud Run with Gemini 2.5 Flash.
-
-All agents communicate via the A2A protocol (JSON-RPC 2.0) and use AgentCore Identity for zero-trust authentication across cloud boundaries. A single Cognito User Pool serves as the trust anchor for M2M tokens, with AgentCore Identity handling token vaulting, JWT validation, and 3LO (Authorization Code Grant) flows.
-
-## Demo
+## 🎬 Demo
 
 ![demo](./images/demo.gif)
 
-## Architecture Overview
+## Why This Matters
 
-![arch](./images/architecture.png)
+Enterprise AI doesn't live in one cloud or one vendor's ecosystem. This project shows how to build a multi-agent system that:
 
-> [!NOTE]
-> **Default Models**
->
-> This solution uses the following AI models by default:
-> - **Host Agent (Google ADK on AgentCore Runtime)**: `global.anthropic.claude-sonnet-4-20250514-v1:0` (Amazon Bedrock via LiteLLM)
-> - **Monitoring Agent (Strands on AgentCore Runtime)**: `global.anthropic.claude-sonnet-4-5-20250929-v1:0` (Amazon Bedrock)
-> - **Web Search Agent (Strands on GCP Cloud Run)**: `gemini/gemini-2.5-flash` (Google AI via LiteLLM)
->
-> These models can be customized during deployment. The deployment script will prompt you to specify different model IDs if needed.
+- **Uses the best model for each job** — Claude on Bedrock for AWS-aware reasoning, Gemini on GCP for web search. No lock-in.
+- **Spans clouds without sharing secrets** — AWS and GCP agents authenticate via cryptographically verifiable JWT tokens from a single identity provider. No VPC peering, no static credentials, no network-level trust.
+- **Propagates user identity end-to-end** — The user who logged in is visible to every downstream agent via the `onBehalfOf` OBO claim. Audit logs say "alice@demo.com (admin) asked this" — not just "the agent did it."
+- **Enforces role-based access without a policy engine** — Role filtering is applied at the agent layer: alice (admin) sees all CloudWatch logs, bob (manager) sees only Lambda and API Gateway, charlie (analyst) sees only Lambda.
+- **Uses open protocols** — A2A (JSON-RPC 2.0) for agent-to-agent communication, MCP for tool access. Agents from different frameworks (Google ADK, Strands) collaborate without custom integration code.
 
-## AgentCore Identity: Zero-Trust for the Agent Era
+## 🏗️ Architecture
 
-This project demonstrates how **Amazon Bedrock AgentCore Identity** provides a zero-trust security model for multi-agent systems that span cloud boundaries. The network topology is irrelevant. The identity is everything.
+```mermaid
+graph TB
+    User["👤 User<br/>(Cognito Login)"] --> Frontend["⚛️ React Frontend<br/>+ OBO badge"]
+    Frontend -->|"Bearer user JWT<br/>Authorization header"| HostAgent
 
-### The Problem
+    subgraph AWS ["☁️ AWS (us-west-2)"]
+        Cognito["🔐 Cognito User Pool<br/>Trust Anchor<br/>Pre-Token-Gen v3 Lambda<br/>(injects onBehalfOf claim)"]
 
-Multi-agent systems don't live in a single AWS account or a single cloud. They span organizational boundaries — your agents talk to your partner's agents. They span cloud providers — your Bedrock-hosted agent may need to invoke a tool running on another cloud or on-premises. Traditional network-level trust (VPC peering, VPNs, IP whitelisting) is antithetical to zero-trust.
+        subgraph AgentCore_Host ["AgentCore Runtime"]
+            HostAgent["🎯 Host Agent<br/>Google ADK + Claude Sonnet 4<br/>via LiteLLM / Bedrock<br/><br/>• OBO token exchange<br/>• A2A orchestration<br/>• Gmail 3LO email"]
+        end
 
-### The Solution: Identity-Based Trust
+        subgraph AgentCore_Monitor ["AgentCore Runtime"]
+            MonitorAgent["🔍 Monitoring Agent<br/>Strands + Claude Sonnet 4.5<br/><br/>• Reads onBehalfOf claim<br/>• Role-based log filtering<br/>• STM + LTM memory"]
+        end
 
-AgentCore Identity provides a unified trust fabric that works across these boundaries using **identity-based trust assertions that can be verified anywhere**. An agent in AWS can authenticate to a service on GCP without sharing credentials, without network adjacency, and without implicit trust. The receiving service verifies the agent's identity, checks the authorization policy, and makes a real-time access decision.
+        Gateway["⚙️ AgentCore Gateway<br/>(MCP)<br/>DescribeLogGroups<br/>FilterLogEvents<br/>GetLogEvents"]
+        Memory["🧠 AgentCore Memory<br/>STM: conversation turns<br/>LTM: /technical-issues<br/>    /knowledge"]
+        Bedrock["🤖 Amazon Bedrock<br/>Claude Sonnet 4 / 4.5"]
 
-### How This Project Demonstrates It
+        MonitorAgent -->|workload token| Gateway
+        MonitorAgent --> Memory
+        MonitorAgent --> Bedrock
+        HostAgent -->|OBO M2M token| MonitorAgent
+        HostAgent --> Bedrock
+        Cognito -.->|JWKS validation| MonitorAgent
+        Cognito -.->|issues OBO token| HostAgent
+    end
 
-This project has three agents across **two clouds** with a single identity provider (Cognito) as the trust anchor:
+    subgraph GCP ["☁️ GCP (Cloud Run)"]
+        WebSearch["🌐 Web Search Agent<br/>Strands + Gemini 2.5 Flash<br/><br/>• Cognito JWT validation<br/>• Tavily web search<br/>• AgentCore Memory tools<br/>• Reads onBehalfOf for audit"]
+    end
+
+    HostAgent -->|"OBO M2M token<br/>A2A JSON-RPC"| WebSearch
+    WebSearch -->|cross-cloud| Memory
+    Cognito -.->|JWKS validation| WebSearch
+
+    LocalServer["💻 OAuth2 Callback Server<br/>(localhost:9090)<br/>/oauth2/status polling"]
+    Frontend <-->|3LO consent detect| LocalServer
+    HostAgent -->|Gmail 3LO| Gmail["📧 Gmail API"]
+```
+
+### Identity Flow
 
 ```
-                    Cognito User Pool (Trust Anchor)
-                    ┌──────────────────────────┐
-                    │  Issues M2M JWT tokens    │
-                    │  JWKS public keys are     │
-                    │  verifiable anywhere       │
-                    └─────────┬────────────────┘
-                              │
-              ┌───────────────┼───────────────────┐
-              │               │                   │
-     AWS AgentCore       AWS AgentCore         GCP Cloud Run
-     Runtime             Runtime               (no AgentCore)
-  ┌──────────────┐   ┌──────────────────┐   ┌──────────────────┐
-  │ Host Agent   │   │ Monitoring Agent │   │ WebSearch Agent  │
-  │              │   │                  │   │                  │
-  │ Outbound:    │   │ Inbound:         │   │ Inbound:         │
-  │ AgentCore    │   │ AgentCore        │   │ Cognito JWT      │
-  │ Identity     │   │ Runtime auto-    │   │ validation       │
-  │ fetches      │   │ validates JWT    │   │ (auth_middleware) │
-  │ Cognito M2M  │   │ via Authorizer   │   │                  │
-  │ tokens from  │   │ Config           │   │ Same trust model │
-  │ token vault  │   │                  │   │ different runtime │
-  └──────────────┘   └──────────────────┘   └──────────────────┘
+User logs in (Cognito)
+  → Frontend sends user JWT as Authorization header to Host Agent
+    → Host Agent calls Cognito /oauth2/token with onBehalfOfToken = user JWT
+      → Pre-Token-Gen Lambda injects {email, sub} into onBehalfOf claim
+        → OBO M2M token forwarded to Monitor + WebSearch agents
+          → Each agent decodes onBehalfOf → applies role-based policy
+            → Audit metadata {email, role, agent} embedded in response artifact
+              → Frontend renders "On behalf of: alice@demo.com (admin)" badge
 ```
 
-**Four layers of zero-trust identity in action:**
+### Role-Based Access
 
-| Layer | What | Where in Code |
+| User | Role | CloudWatch access |
 |---|---|---|
-| **1. Token Vaulting** | AgentCore Identity securely stores Cognito client credentials and fetches M2M tokens on demand. The host agent never handles raw secrets. | `host_adk_agent/agent.py` — `@requires_access_token` decorator |
-| **2. Inbound Auth (AWS)** | AgentCore Runtime validates incoming JWTs automatically before agent code runs. Configured via `CustomJWTAuthorizer` with allowed client lists. | `cloudformation/monitoring_agent.yaml` — `AuthorizerConfiguration` |
-| **3. Inbound Auth (Cross-Cloud)** | On GCP where AgentCore Runtime isn't available, `GetWorkloadAccessTokenForJWT` validates the incoming Cognito JWT via AgentCore Identity — same trust model, different compute. | `web_search_strands_agent/agentcore_identity_auth.py` |
-| **4. Outbound Auth (Tools)** | The monitoring agent uses its workload identity token to obtain gateway credentials for CloudWatch access — no static credentials stored in code. | `monitoring_strands_agent/utils.py` — `get_resource_oauth2_token` |
-| **5. Delegated User Identity (OBO)** | The host agent exchanges its M2M token *with* the user's JWT attached so downstream agents see who the action is for. Each downstream agent reads `onBehalfOf` from the inbound token and applies role-based policy. | `host_adk_agent/obo_token.py`, `monitoring_strands_agent/obo_claims.py`, `web_search_strands_agent/obo_claims.py` |
+| alice@demo.com | admin | All log groups |
+| bob@demo.com | manager | `/aws/lambda/` + API Gateway only |
+| charlie@demo.com | analyst | `/aws/lambda/` only |
+| anyone else | viewer | Blocked — no access |
 
-**The key insight**: Whether an agent runs on AWS AgentCore Runtime or GCP Cloud Run, the trust model is the same — cryptographically verifiable JWT tokens issued by a central identity provider. The infrastructure layer changes, but the identity verification is consistent. No VPC peering. No shared secrets. No network-level trust. Just identity.
+## 🧩 Agents
 
-### Delegated User Identity (On-Behalf-Of)
+| Agent | Framework | Runtime | Model | Key Features |
+|---|---|---|---|---|
+| **Host Agent** | Google ADK | AWS AgentCore Runtime | Claude Sonnet 4 (Bedrock) | OBO token exchange, A2A orchestration, Gmail 3LO |
+| **Monitoring Agent** | Strands SDK | AWS AgentCore Runtime | Claude Sonnet 4.5 (Bedrock) | CloudWatch via MCP Gateway, role filtering, STM+LTM memory |
+| **Web Search Agent** | Strands SDK | GCP Cloud Run | Gemini 2.5 Flash (LiteLLM) | Tavily search, Cognito JWT middleware, memory tools |
 
-Multi-agent systems hit a common problem: the agent that finally does the work has lost the user's identity. The downstream call is M2M, so audit logs say "the agent did it" instead of "the agent did it on behalf of alice@demo.com." We fix that with a Cognito-native OBO flow.
+## ✅ Prerequisites
 
-**Mechanism.** The host agent does not call `OAuth2CredentialProvider` directly. It calls `POST /oauth2/token` on the Cognito domain with `grant_type=client_credentials` plus an `aws_client_metadata` body field carrying the user's JWT:
+### AWS
+- Active AWS account in `us-west-2`
+- AWS CLI configured: `aws configure set region us-west-2`
+- Bedrock model access enabled for Claude Sonnet 4 and 4.5
 
-```
-aws_client_metadata = {
-  "onBehalfOfToken": "<incoming user JWT>",
-  "callerApp": "host-agent"
-}
-```
+### GCP (for Web Search Agent)
+- GCP project with billing enabled
+- `gcloud` CLI authenticated
+- Cloud Run, Cloud Build APIs enabled
 
-A Pre-Token-Generation v3 Lambda fires on Cognito's token issuance, decodes the user JWT from `clientMetadata.onBehalfOfToken`, and returns a custom `onBehalfOf` claim under `claimsAndScopeOverrideDetails.accessTokenGeneration.claimsToAddOrOverride`. The agent's M2M token now carries the user's identity. Downstream agents read it from the inbound bearer (no extra hop, no extra IdP) and apply role-based policy: `alice→admin`, `bob→manager`, `charlie→analyst`, default→`viewer`.
+### Tools
+- Python 3.13+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
+- Docker (for local builds)
 
-**Why not AgentCore Identity's `ON_BEHALF_OF_TOKEN_EXCHANGE`?** That API requires an OAuth2 IdP that implements RFC 8693 token exchange or RFC 7523 §2.1 JWT bearer grant. Cognito implements neither. The supported out-of-the-box OBO providers are Microsoft Entra ID and any custom RFC-compliant IdP. We use Cognito's Pre-Token-Generation feature to achieve the same outcome on the existing identity provider — Cognito-native delegated identity.
+### API Keys
+- **Google API Key** — [Google AI Studio](https://aistudio.google.com/app/apikey) (Gemini for web search agent)
+- **Tavily API Key** — [tavily.com](https://tavily.com/) (web search)
 
-**Trust boundary.** The user JWT itself never leaves the host agent. Only the host's exchanged M2M token (with the `onBehalfOf` claim, signed by Cognito) flows downstream. Downstream agents trust the claim because AgentCore Runtime / `GetWorkloadAccessTokenForJWT` already validated the token signature.
+### Gmail 3LO (optional — for email findings feature)
+- Google OAuth 2.0 client ID + secret from [Google Cloud Console](https://console.developers.google.com/)
+- Gmail API enabled, test users added to OAuth consent screen
 
-| Code | Purpose |
-|---|---|
-| `cloudformation/lambdas/pre_token_gen.py` | Pre-Token-Gen v3 handler that copies user identity into `onBehalfOf` |
-| `host_adk_agent/obo_token.py` | Async OBO token exchanger with single-flight cache |
-| `host_adk_agent/agent.py` — `_OBOAuth(httpx.Auth)` | Per-request bearer injection for outbound A2A calls |
-| `monitoring_strands_agent/obo_claims.py` | Role map + CloudWatch result filtering by role |
-| `web_search_strands_agent/obo_claims.py` | Decode `onBehalfOf` from inbound bearer for audit logging |
-| `frontend/src/components/ChatMessage.tsx` | "On behalf of: alice@demo.com (admin)" badge per agent response |
-
-## What is A2A?
-
-<details>
-  <summary>Agent-to-Agent (A2A)</summary>
-   **Agent-to-Agent (A2A)** is an open standard protocol that enables seamless communication and collaboration between AI agents across different platforms and implementations. The A2A protocol defines:
-
-   - **Agent Discovery**: Standardized agent cards that describe capabilities, skills, and communication endpoints
-   - **Communication Format**: JSON-RPC 2.0-based message format for reliable agent-to-agent communication
-   - **Authentication**: OAuth 2.0-based security model for secure inter-agent communication
-   - **Interoperability**: Platform-agnostic design allowing agents from different frameworks to collaborate
-
-   Learn more about the A2A protocol: [A2A Specification](https://a2a-protocol.org/)
-
-   ## A2A Support on Amazon Bedrock AgentCore
-
-   Amazon Bedrock AgentCore provides native support for the A2A protocol, enabling you to:
-
-   - **Deploy A2A-compliant agents** as runtime services with automatic endpoint management
-   - **Secure authentication** via AWS Cognito OAuth 2.0 integration
-   - **Agent discovery** through standardized agent card endpoints
-   - **Scalable deployment** leveraging AWS infrastructure for production workloads
-   - **Built-in observability** with CloudWatch integration and OpenTelemetry support
-
-   AgentCore simplifies A2A agent deployment by handling infrastructure, authentication, scaling, and monitoring automatically.
-</details>
-
-## Prerequisites
-
-1. **AWS Account**: You need an active AWS account with appropriate permissions
-   - [Create AWS Account](https://aws.amazon.com/account/)
-   - [AWS Console Access](https://aws.amazon.com/console/)
-
-2. **AWS CLI**: Install and configure AWS CLI with your credentials
-   - [Install AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-   - [Configure AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html)
-   - **Important**: Set your region to `us-west-2`
-
-   ```bash
-   aws configure set region us-west-2
-   ```
-
-3. **Python 3.8+**: Required to run the deployment scripts
-
-4. **uv**: Install uv package manager using [guide](https://docs.astral.sh/uv/getting-started/installation/)
-
-5. **API Keys**: You'll need the following API keys (the deployment script will prompt for these):
-   - **Google API Key**: Get from [Google AI Studio](https://aistudio.google.com/app/apikey) (for Gemini on the web search agent)
-   - **Tavily API Key**: Get from [Tavily](https://tavily.com/) (for web search)
-
-   > **Note**: Make sure your Google account has credits if you are using paid models.
-
-6. **Gmail 3LO (Optional)**: To enable the "email findings" feature:
-   - **Google OAuth Client ID + Secret**: Get from [Google Cloud Console](https://console.developers.google.com/) (OAuth 2.0 credentials, Web application type)
-   - Enable the **Gmail API** in your Google Cloud project
-   - Add test users in the OAuth consent screen
-
-6. **Supported Regions**: This solution is currently tested and supported in the following AWS regions:
-
-   | Region Code   | Region Name          | Status      |
-   |---------------|----------------------|-------------|
-   | `us-west-2`   | US West (Oregon)     | ✅ Supported |
-
-It is important to note that this sample is restricted to us-west-2 region, however Amazon Bedrock AgentCore Runtime supports A2A protocol in various other regions as well. Please find the supported regions [here](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html). 
-
-## Quick Start Deployment
-
-The easiest way to deploy this solution is using our automated deployment script:
+## 🚀 Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/awslabs/amazon-bedrock-agentcore-samples.git
+git clone https://github.com/rajolishruthi/agentcore-samples.git
 cd 02-use-cases/A2A-multi-agent-incident-response
 
-# Run the interactive deployment script
+# Deploy all AWS stacks interactively
 uv run deploy.py
 ```
 
-The deployment script will:
+The script deploys in order: Cognito → Monitoring Agent → Host Agent (~10-15 minutes total).
 
-1. ✅ Verify AWS CLI is installed and configured
-2. ✅ Check AWS credentials are valid
-3. ✅ Confirm region is set to `us-west-2`
-4. ✅ Interactively collect all required parameters
-5. ✅ Generate unique S3 bucket names
-6. ✅ Save configuration to `.a2a.config`
-7. ✅ Automatically deploy all stacks in the correct order
-8. ✅ Wait for each stack to complete before proceeding
+Then deploy the Web Search Agent to GCP — see [DEPLOY_MULTICLOUD.md](./DEPLOY_MULTICLOUD.md).
 
-**Total deployment time**: Approximately 10-15 minutes
-
-## React Frontend
-
-Run the frontend using following commands.
+## 🖥️ Frontend
 
 ```bash
 cd frontend
 npm install
-
-chmod +x ./setup-env.sh
-./setup-env.sh
-
+chmod +x ./setup-env.sh && ./setup-env.sh
 npm run dev
 ```
 
-## Google ADK Web App
-
-[Agent Development Kit Web](https://github.com/google/adk-web) is the built-in developer UI that integrated with Google Agent Development Kit for easier agent development and debug.
-
-![adk](./images/adk.gif)
-
-1. Follow setup [instructions](https://github.com/google/adk-web?tab=readme-ov-file#-prerequisite).
-2. From the root of this [project](./) run `adk web`.
-
-## A2A Protocol Inspector
-
-The [A2A Inspector](https://github.com/a2aproject/a2a-inspector) is a web-based tool designed to help developers inspect, debug, and validate servers that implement the A2A (Agent2Agent) protocol. It provides a user-friendly interface to interact with an A2A agent, view communication, and ensure specification compliance.
-
-![inspector](./images/inspector.gif)
-
-1. Follow Setup and Running the Application [instructions](https://github.com/a2aproject/a2a-inspector?tab=readme-ov-file#setup-and-running-the-application).
-2. Get URL and bearer token from:
-
-   ```bash
-
-   uv run monitoring_strands_agent/scripts/get_m2m_token.py   
-   # OR
-   uv run web_search_openai_agents/scripts/get_m2m_token.py   
-   ```
-
-3. Paste the URL & bearer token (`Bearer <Add Here>`) on A2A Inspector and add three headers `Authorization`, `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`, and `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actorid`. The value of `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` should be atleast 32 characters (`550e8400-e29b-41d4-a716-446655440000
-`).
-
-### Bearer tokens
-
-You can obtain bearer tokens for each agent to use with tools like the A2A Inspector or for direct API testing.
-Get M2M token for the monitoring agent:
+For Gmail 3LO (email findings), also start the OAuth2 callback server:
 
 ```bash
+uv run host_adk_agent/oauth2_callback_server.py --region us-west-2
+```
+
+The frontend polls `localhost:9090/oauth2/status` after displaying a Gmail auth URL and automatically retries the email request when consent is granted — no manual "access is granted" message needed.
+
+## 🔑 Bearer Tokens
+
+Get M2M tokens for direct agent testing or the A2A Inspector:
+
+```bash
+# Monitoring agent
 uv run monitoring_strands_agent/scripts/get_m2m_token.py
 
-uv run web_search_openai_agents/scripts/get_m2m_token.py
+# Web search agent
+uv run web_search_strands_agent/scripts/get_m2m_token.py
 
+# Host agent (uses Cognito username/password)
 uv run host_adk_agent/scripts/get_m2m_token.py
 ```
 
-## Test Scripts
-
-Test individual agents using the interactive script:
+## 🧪 Test Scripts
 
 ```bash
-# Test monitoring agent
+# Test individual agents interactively
 uv run test/connect_agent.py --agent monitor
-
-# Test web search agent
 uv run test/connect_agent.py --agent websearch
-
-# Test host agent
 uv run test/connect_agent.py --agent host
 ```
 
-## Cleanup
+## 🔍 Debugging Tools
 
-### Automated Cleanup (Recommended)
-
-The easiest way to clean up all resources is using our automated cleanup script:
-
+### ADK Web UI
 ```bash
-# Run the cleanup script
-uv run cleanup.py
+adk web   # from the project root
+```
+See [ADK Web](https://github.com/google/adk-web) for setup.
+
+### A2A Inspector
+1. Install [A2A Inspector](https://github.com/a2aproject/a2a-inspector)
+2. Get a bearer token (above)
+3. Add headers: `Authorization`, `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` (min 32 chars), `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actorid`
+
+## 📁 Project Structure
+
+```
+A2A-multi-agent-incident-response/
+├── cloudformation/
+│   ├── cognito.yaml              # Cognito User Pool + OBO client + Pre-Token-Gen Lambda
+│   ├── host_agent.yaml           # Host Agent AgentCore Runtime
+│   ├── monitoring_agent.yaml     # Monitoring Agent AgentCore Runtime + MCP Gateway
+│   └── lambdas/
+│       └── pre_token_gen.py      # Copies user identity into onBehalfOf JWT claim
+├── host_adk_agent/
+│   ├── agent.py                  # Root agent, OBO A2A client factory (_OBOAuth)
+│   ├── main.py                   # AgentCore entrypoint, extracts user JWT
+│   ├── obo_token.py              # OBO token exchanger with single-flight cache
+│   ├── email_tool.py             # Gmail 3LO send-email tool
+│   ├── oauth2_callback_server.py # Local callback server + /oauth2/status polling endpoint
+│   └── prompt/__init__.py        # Delegation rules (monitor / websearch / email)
+├── monitoring_strands_agent/
+│   ├── agent.py                  # Strands agent + MCP Gateway connection
+│   ├── agent_executor.py         # OBO decode, role filtering, streaming
+│   ├── obo_claims.py             # Role map + log group prefix filter
+│   └── memory_hook.py            # Auto STM save + LTM retrieval via Strands hooks
+├── web_search_strands_agent/     # GCP Cloud Run deployment
+│   ├── agent.py                  # Strands agent + Tavily + memory tools
+│   ├── agent_executor.py         # OBO decode for audit, streaming
+│   ├── agentcore_identity_auth.py # Cognito JWT validation via GetWorkloadAccessTokenForJWT
+│   ├── obo_claims.py             # Decode onBehalfOf for audit metadata
+│   └── deploy.sh                 # GCP Cloud Run deployment script
+├── frontend/                     # React + Vite + AWS Amplify
+│   └── src/
+│       ├── hooks/useChat.tsx      # Streaming, OBO badge, 3LO auto-notify polling
+│       └── components/
+│           ├── ChatMessage.tsx    # OBO badge, transfer block, metadata panel
+│           └── ChatContainer.tsx  # Auth session, agent init
+├── test/
+│   └── connect_agent.py          # Interactive CLI for all three agents
+├── deploy.py                     # Interactive deployment script
+├── cleanup.py                    # Automated resource cleanup
+├── DEPLOY_MULTICLOUD.md          # GCP Cloud Run deployment guide
+└── DEMO_TEST_CASES.md            # Frontend test cases for demo users
 ```
 
-The cleanup script will:
+## 🔒 Security Considerations
 
-1. 🔍 Load your deployment configuration from `.a2a.config`
-2. 📋 Show all resources that will be deleted
-3. 🔒 Require double confirmation (including typing 'DELETE')
-4. 🗑️ Delete all resources in the correct reverse order:
-   - Host Agent Stack
-   - Web Search Agent Stack
-   - Monitoring Agent Stack
-   - Cognito Stack
-   - S3 Bucket and contents
-5. ⏱️ Wait for each deletion to complete before proceeding
+This sample is for educational purposes. Before production use, address:
 
-**Total cleanup time**: Approximately 10-15 minutes
+- **IAM policies** — scope down to least-privilege (current policies use broad `*` resources in several places)
+- **OBO client secret** — stored in Secrets Manager; rotate regularly
+- **Cognito domain** — use a custom domain in production
+- **GCP static credentials** — replace with Workload Identity Federation (see [DEPLOY_MULTICLOUD.md](./DEPLOY_MULTICLOUD.md))
+- **CORS** — `oauth2_callback_server.py` allows `localhost` origins; lock down for production
+
+## 🧹 Cleanup
+
+```bash
+# AWS resources
+uv run cleanup.py
+
+# GCP
+gcloud run services delete web-search-strands-agent --region us-central1
+```
 
 > [!WARNING]
-> This will permanently delete all deployed resources. This action cannot be undone!
+> Cleanup permanently deletes all deployed resources including the Cognito User Pool, AgentCore Runtimes, ECR images, and S3 bucket. This cannot be undone.
 
-### Troubleshooting Cleanup
+## 📚 Related Docs
 
-If cleanup fails or you encounter errors:
+| Document | Purpose |
+|---|---|
+| [DEPLOY_MULTICLOUD.md](./DEPLOY_MULTICLOUD.md) | Step-by-step GCP Cloud Run deployment |
+| [DEMO_TEST_CASES.md](./DEMO_TEST_CASES.md) | Frontend test cases for Alice (admin) and Bob (manager) |
+| [host_adk_agent/AGENT_DOC.md](./host_adk_agent/AGENT_DOC.md) | Host agent internals, OBO flow, 3LO |
+| [monitoring_strands_agent/AGENT_DOC.md](./monitoring_strands_agent/AGENT_DOC.md) | Monitoring agent internals, memory hooks, role filtering |
+| [web_search_strands_agent/AGENT_DOC.md](./web_search_strands_agent/AGENT_DOC.md) | Web search agent internals, cross-cloud auth, memory tools |
 
-1. **Check stack status** in the AWS CloudFormation console
-2. **Manual resource deletion**: Some resources may need to be deleted manually if they have dependencies
-3. **S3 bucket not empty**: Ensure the bucket is completely empty before deletion
-4. **Review CloudWatch Logs**: Check for any errors in stack deletion events
+## 📄 License
+
+MIT-0 — see [LICENSE](../../LICENSE)

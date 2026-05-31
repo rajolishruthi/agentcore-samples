@@ -58,9 +58,19 @@ MonitoringAgentExecutor.execute(context, event_queue)
   ├── Extract from headers:
   │   ├── session_id (x-amzn-bedrock-agentcore-runtime-session-id)
   │   ├── actor_id (x-amzn-bedrock-agentcore-runtime-custom-actorid)
-  │   └── workload_token (x-amzn-bedrock-agentcore-runtime-workload-accesstoken)
+  │   ├── workload_token (x-amzn-bedrock-agentcore-runtime-workload-accesstoken)
+  │   └── bearer_token (authorization) — carries OBO claim
   │
-  ├── Validate all three are present (else InvalidParamsError)
+  ├── Decode OBO identity: obo_claims.decode_user_identity(bearer_token)
+  │   └── Returns {email, sub, role} or None if no onBehalfOf claim
+  │
+  ├── Apply role-based filter to user_message:
+  │   ├── admin  → no filter (pass through)
+  │   ├── manager → prepend "[ROLE: manager] Only return /aws/lambda/ and /aws/apigateway/ results"
+  │   ├── analyst → prepend "[ROLE: analyst] Only return /aws/lambda/ results"
+  │   └── viewer  → replace message with "inform user their role does not permit access"
+  │
+  ├── Validate session_id, actor_id, workload_token present (else InvalidParamsError)
   │
   ├── Lazily create MonitoringAgent (first request only)
   │
@@ -191,12 +201,18 @@ AuthorizerConfiguration:
   CustomJWTAuthorizer:
     DiscoveryUrl: <Cognito OIDC discovery URL>
     AllowedClients:
-      - <Cognito client ID for the monitoring agent>
+      - <Cognito MonitoringClientId>
+      - <Cognito AgentOBOClientId>   # OBO-exchanged tokens must also be accepted
+RequestHeaderConfiguration:
+  RequestHeaderAllowlist:
+    - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actorid
+    - Authorization   # Required so the OBO bearer token reaches agent_executor.py
 ```
 
 This means:
 - The agent code never sees an unauthenticated request
-- Only tokens from the specific Cognito client are accepted
+- Both the standard M2M client and the OBO client are accepted
+- The `Authorization` header must be in the allowlist — without it, `agent_executor.py` cannot read the OBO bearer token to decode the `onBehalfOf` claim and apply role-based filtering
 - JWT signature, expiry, and issuer are all verified at the infrastructure layer
 
 ### Outbound: Workload Identity for Tool Access
@@ -226,8 +242,9 @@ This is zero-trust end-to-end: the host agent proves its identity to reach this 
 | File | Purpose |
 |---|---|
 | `main.py` | A2A server setup, agent card definition, health endpoint |
-| `agent_executor.py` | A2A request handling, streaming, task management |
+| `agent_executor.py` | A2A request handling, OBO role filtering, streaming, task management |
 | `agent.py` | Strands agent creation, MCP gateway connection |
+| `obo_claims.py` | Decode `onBehalfOf` JWT claim; role map; log group prefix filter |
 | `memory_hook.py` | Memory hooks: load context, retrieve long-term, save interactions |
 | `utils.py` | MCP gateway client creation with OAuth2 auth |
 | `prompt/__init__.py` | System prompt — CloudWatch specialist with memory guidelines |

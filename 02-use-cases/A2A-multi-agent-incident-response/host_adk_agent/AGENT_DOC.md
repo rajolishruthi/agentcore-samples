@@ -59,14 +59,31 @@ get_root_agent(session_id, actor_id)
   └── Create root Agent(model, instruction=SYSTEM_PROMPT, sub_agents=[monitor, websearch])
 ```
 
-### 3. Authentication (Zero-Trust): `_create_client_factory()`
+### 3. OBO Token Exchange: `obo_token.py`
+
+Before creating A2A clients, the host agent exchanges the inbound user JWT for an OBO-enriched M2M token:
+
+```
+main.py: extracts "Authorization: Bearer <user JWT>" from request headers
+  → agent.py: _OBOAuth(httpx.Auth) attaches per-request via httpx auth=
+    → obo_token.OBOTokenExchanger.fetch(user_jwt)
+      → POST Cognito /oauth2/token with:
+          grant_type=client_credentials
+          aws_client_metadata={"onBehalfOfToken": <user JWT>, "callerApp": "host-agent"}
+      → Pre-Token-Gen v3 Lambda fires, copies user identity into onBehalfOf claim
+      → Returns M2M token carrying: sub, email, role of the original user
+      → Cached per user JWT (single-flight for concurrent requests)
+```
+
+The result: downstream agents receive a token they can decode to learn *who* the action is on behalf of — without the user JWT itself ever leaving the host agent.
+
+### 4. Authentication (Zero-Trust): `_create_client_factory()`
 
 This is where **AgentCore Identity's zero-trust model** comes to life. Each sub-agent gets its own `LazyClientFactory` that:
 
-1. Uses `@requires_access_token` decorator (AgentCore Identity token vaulting)
-2. AgentCore Identity fetches a **Cognito M2M OAuth2 token** from its secure vault — the host agent never sees raw client credentials
-3. Creates an `httpx.AsyncClient` with the Bearer token in headers
-4. Also passes `session_id` and `actor_id` as custom headers
+1. Uses `_OBOAuth(httpx.Auth)` — fetches an OBO-exchanged Cognito token per request
+2. Creates an `httpx.AsyncClient` with the OBO Bearer token in headers
+3. Also passes `session_id` and `actor_id` as custom headers
 
 The same token-based auth pattern works for both sub-agents regardless of where they run:
 - **Monitor agent (AWS)**: AgentCore Runtime validates the token automatically via `CustomJWTAuthorizer`
@@ -76,7 +93,7 @@ This is zero-trust in action — no VPC peering, no shared secrets, no network-l
 
 The factory creates **fresh httpx clients on each A2A call** to avoid event loop issues. This is critical because the agent card resolution and actual A2A invocations may happen in different async contexts.
 
-### 4. Routing Logic: `prompt/__init__.py`
+### 5. Routing Logic: `prompt/__init__.py`
 
 The system prompt defines strict delegation rules:
 
@@ -84,7 +101,8 @@ The system prompt defines strict delegation rules:
 |---|---|
 | CloudWatch, logs, metrics, alarms, monitoring, AWS resources | `monitor_agent` |
 | Questions about previous sessions or past investigations | `monitor_agent` (has memory) |
-| AWS troubleshooting guides, documentation, solutions | `websearch_agent` |
+| AWS troubleshooting guides, documentation, solutions, "search for", "look up" | `websearch_agent` |
+| "Save to memory", "remember this", "save that for later" | `websearch_agent` (owns memory tools) |
 | Error messages and resolution steps | `websearch_agent` |
 
 For troubleshooting requests, the orchestration strategy is:
@@ -128,8 +146,11 @@ SSM Parameters:
 
 | File | Purpose |
 |---|---|
-| `main.py` | Entry point, BedrockAgentCoreApp, request handling |
-| `agent.py` | Root agent creation, sub-agent wiring, A2A client factory |
+| `main.py` | Entry point, BedrockAgentCoreApp, extracts user JWT for OBO |
+| `agent.py` | Root agent creation, sub-agent wiring, OBO A2A client factory |
+| `obo_token.py` | OBO token exchanger — Cognito client_credentials + onBehalfOfToken |
+| `email_tool.py` | Gmail 3LO send-email tool using AgentCore Identity USER_FEDERATION |
+| `oauth2_callback_server.py` | Local callback server for Gmail consent; `/oauth2/status` for frontend polling |
 | `prompt/__init__.py` | System prompt with delegation rules |
 | `utils.py` | SSM parameter retrieval, AWS account/region info |
 | `Dockerfile` | Container build with OpenTelemetry |
