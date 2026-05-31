@@ -32,6 +32,7 @@ class OAuth2CallbackServer:
     def __init__(self, region: str):
         self._client = boto3.client("bedrock-agentcore", region_name=region)
         self._user_token: str | None = None
+        self._consent_granted: bool = False
         self.app = FastAPI(title="OAuth2 Callback Server")
 
         # Allow CORS from the React frontend
@@ -48,6 +49,14 @@ class OAuth2CallbackServer:
         @self.app.get("/ping")
         async def ping():
             return {"status": "healthy"}
+
+        @self.app.get("/oauth2/status")
+        async def oauth2_status():
+            """Frontend polls this to detect when consent has been granted."""
+            granted = self._consent_granted
+            if granted:
+                self._consent_granted = False  # reset so next request starts fresh
+            return {"granted": granted}
 
         @self.app.post("/userIdentifier/token")
         async def store_user_token(request: UserTokenRequest):
@@ -90,6 +99,7 @@ class OAuth2CallbackServer:
                     userIdentifier={"userToken": self._user_token},
                 )
                 logger.info(f"[3LO] ✅ OAuth2 flow completed successfully!")
+                self._consent_granted = True
 
                 html = """
                 <!DOCTYPE html>

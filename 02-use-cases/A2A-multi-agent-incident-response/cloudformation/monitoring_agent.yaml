@@ -916,14 +916,16 @@ Resources:
           ContainerUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AgentECRRepository}:build-1'
       ProtocolConfiguration: A2A
       RequestHeaderConfiguration :
-        RequestHeaderAllowlist: 
+        RequestHeaderAllowlist:
           - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actorid
+          - Authorization
       AuthorizerConfiguration:
         CustomJWTAuthorizer:
           DiscoveryUrl:
             Fn::ImportValue: !Sub '${CognitoStackName}-DiscoveryUrl'
           AllowedClients:
             - Fn::ImportValue: !Sub '${CognitoStackName}-MonitoringClientId'
+            - Fn::ImportValue: !Sub '${CognitoStackName}-AgentOBOClientId'
       EnvironmentVariables:
         MODEL_ID: !Ref BedrockModelId
         MCP_REGION: !Sub '${AWS::Region}'

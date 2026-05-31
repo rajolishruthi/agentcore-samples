@@ -35,6 +35,11 @@ Parameters:
     Default: ''
     Description: 'Optional space-separated OAuth2 scopes requested in OBO client_credentials grant. Leave blank to use defaults configured on the AgentOBO client.'
 
+  ImageTag:
+    Type: String
+    Default: 'build-28'
+    Description: 'Docker image tag to use for the AgentCore Runtime'
+
 Resources:
   AgentCoreRuntimeExecutionRole:
     Type: AWS::IAM::Role
@@ -720,7 +725,7 @@ Resources:
         NetworkMode: "PUBLIC"
       AgentRuntimeArtifact:
         ContainerConfiguration:
-          ContainerUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AgentECRRepository}:build-1'
+          ContainerUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AgentECRRepository}:${ImageTag}'
       ProtocolConfiguration: HTTP
       RequestHeaderConfiguration :
         RequestHeaderAllowlist: 
