@@ -33,7 +33,7 @@ graph TB
         end
 
         subgraph AgentCore_Monitor ["AgentCore Runtime"]
-            MonitorAgent["🔍 Monitoring Agent<br/>Strands + Claude Sonnet 4.5<br/><br/>• Reads onBehalfOf claim<br/>• Role-based log filtering<br/>• STM + LTM memory"]
+            MonitorAgent["🔍 Monitoring Agent<br/>Strands + Claude Sonnet 4<br/><br/>• Reads onBehalfOf claim<br/>• Role-based log filtering<br/>• STM + LTM memory"]
         end
 
         Gateway["⚙️ AgentCore Gateway<br/>(MCP)<br/>DescribeLogGroups<br/>FilterLogEvents<br/>GetLogEvents"]
@@ -71,8 +71,8 @@ User logs in (Cognito)
       → Pre-Token-Gen Lambda injects {email, sub} into onBehalfOf claim
         → OBO M2M token forwarded to Monitor + WebSearch agents
           → Each agent decodes onBehalfOf → applies role-based policy
-            → Audit metadata {email, role, agent} embedded in response artifact
-              → Frontend renders "On behalf of: alice@demo.com (admin)" badge
+            → Audit metadata embedded as <!--AUDIT:{...}--> in response artifact text
+              → Frontend (ChatMessage.tsx) strips marker, renders "On behalf of: alice@demo.com (admin)" badge
 ```
 
 ### Role-Based Access
@@ -89,7 +89,7 @@ User logs in (Cognito)
 | Agent | Framework | Runtime | Model | Key Features |
 |---|---|---|---|---|
 | **Host Agent** | Google ADK | AWS AgentCore Runtime | Claude Sonnet 4 (Bedrock) | OBO token exchange, A2A orchestration, Gmail 3LO |
-| **Monitoring Agent** | Strands SDK | AWS AgentCore Runtime | Claude Sonnet 4.5 (Bedrock) | CloudWatch via MCP Gateway, role filtering, STM+LTM memory |
+| **Monitoring Agent** | Strands SDK | AWS AgentCore Runtime | Claude Sonnet 4 (Bedrock, configurable via `MODEL_ID`) | CloudWatch via MCP Gateway, role filtering, STM+LTM memory |
 | **Web Search Agent** | Strands SDK | GCP Cloud Run | Gemini 2.5 Flash (LiteLLM) | Tavily search, Cognito JWT middleware, memory tools |
 
 ## ✅ Prerequisites
