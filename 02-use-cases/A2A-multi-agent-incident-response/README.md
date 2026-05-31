@@ -22,42 +22,49 @@ Enterprise AI doesn't live in one cloud or one vendor's ecosystem. This project 
 
 ```mermaid
 graph TB
-    User["👤 User<br/>(Cognito Login)"] --> Frontend["⚛️ React Frontend<br/>+ OBO badge"]
+    User["👤 User<br/>(Cognito Login)"] --> Frontend["⚛️ React Frontend<br/>OBO badge + 3LO auto-notify"]
     Frontend -->|"Bearer user JWT<br/>Authorization header"| HostAgent
 
     subgraph AWS ["☁️ AWS (us-west-2)"]
-        Cognito["🔐 Cognito User Pool<br/>Trust Anchor<br/>Pre-Token-Gen v3 Lambda<br/>(injects onBehalfOf claim)"]
+        Cognito["🔐 Cognito User Pool<br/>Trust Anchor<br/>+ Pre-Token-Gen v3 Lambda<br/>(injects onBehalfOf claim)"]
+
+        subgraph Identity ["🔑 AgentCore Identity"]
+            TokenVault["Token Vault<br/>Stores M2M + 3LO credentials<br/>Issues tokens on demand"]
+        end
 
         subgraph AgentCore_Host ["AgentCore Runtime"]
-            HostAgent["🎯 Host Agent<br/>Google ADK + Claude Sonnet 4<br/>via LiteLLM / Bedrock<br/><br/>• OBO token exchange<br/>• A2A orchestration<br/>• Gmail 3LO email"]
+            HostAgent["🎯 Host Agent<br/>Google ADK + Claude Sonnet 4<br/><br/>1. OBO exchange: user JWT →<br/>   onBehalfOf M2M token<br/>2. @requires_access_token (M2M)<br/>   → fetches token from vault<br/>3. @requires_access_token<br/>   USER_FEDERATION → Gmail 3LO"]
         end
 
         subgraph AgentCore_Monitor ["AgentCore Runtime"]
-            MonitorAgent["🔍 Monitoring Agent<br/>Strands + Claude Sonnet 4<br/><br/>• Reads onBehalfOf claim<br/>• Role-based log filtering<br/>• STM + LTM memory"]
+            MonitorAgent["🔍 Monitoring Agent<br/>Strands + Claude Sonnet 4<br/><br/>• Inbound: JWT auto-validated<br/>  by Runtime (CustomJWTAuthorizer)<br/>• Decodes onBehalfOf → role filter<br/>• get_resource_oauth2_token()<br/>  → gateway credentials from Identity<br/>• STM + LTM memory"]
         end
 
-        Gateway["⚙️ AgentCore Gateway<br/>(MCP)<br/>DescribeLogGroups<br/>FilterLogEvents<br/>GetLogEvents"]
-        Memory["🧠 AgentCore Memory<br/>STM: conversation turns<br/>LTM: /technical-issues<br/>    /knowledge"]
-        Bedrock["🤖 Amazon Bedrock<br/>Claude Sonnet 4 / 4.5"]
+        Gateway["⚙️ AgentCore Gateway (MCP)<br/>DescribeLogGroups<br/>FilterLogEvents / GetLogEvents"]
+        Memory["🧠 AgentCore Memory<br/>STM: conversation turns<br/>LTM: /technical-issues · /knowledge"]
+        Bedrock["🤖 Amazon Bedrock<br/>Claude Sonnet 4"]
 
-        MonitorAgent -->|workload token| Gateway
+        Cognito -->|"client_credentials<br/>+ onBehalfOfToken"| TokenVault
+        TokenVault -->|"OBO M2M token<br/>(onBehalfOf claim)"| HostAgent
+        TokenVault -->|"gateway OAuth2 token"| MonitorAgent
+        TokenVault -->|"Gmail access token<br/>(3LO vault)"| HostAgent
+
+        HostAgent -->|"OBO M2M token<br/>A2A JSON-RPC"| MonitorAgent
+        MonitorAgent -->|"gateway token"| Gateway
         MonitorAgent --> Memory
         MonitorAgent --> Bedrock
-        HostAgent -->|OBO M2M token| MonitorAgent
         HostAgent --> Bedrock
-        Cognito -.->|JWKS validation| MonitorAgent
-        Cognito -.->|issues OBO token| HostAgent
     end
 
     subgraph GCP ["☁️ GCP (Cloud Run)"]
-        WebSearch["🌐 Web Search Agent<br/>Strands + Gemini 2.5 Flash<br/><br/>• Cognito JWT validation<br/>• Tavily web search<br/>• AgentCore Memory tools<br/>• Reads onBehalfOf for audit"]
+        WebSearch["🌐 Web Search Agent<br/>Strands + Gemini 2.5 Flash<br/><br/>• get_workload_access_token_for_jwt()<br/>  → AgentCore Identity validates<br/>  inbound JWT cross-cloud<br/>• Decodes onBehalfOf → audit log<br/>• Tavily web search<br/>• AgentCore Memory tools (cross-cloud)"]
     end
 
     HostAgent -->|"OBO M2M token<br/>A2A JSON-RPC"| WebSearch
+    WebSearch -->|"GetWorkloadAccessTokenForJWT<br/>(cross-cloud call)"| Identity
     WebSearch -->|cross-cloud| Memory
-    Cognito -.->|JWKS validation| WebSearch
 
-    LocalServer["💻 OAuth2 Callback Server<br/>(localhost:9090)<br/>/oauth2/status polling"]
+    LocalServer["💻 OAuth2 Callback Server<br/>localhost:9090<br/>/oauth2/status polling"]
     Frontend <-->|3LO consent detect| LocalServer
     HostAgent -->|Gmail 3LO| Gmail["📧 Gmail API"]
 ```
