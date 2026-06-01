@@ -426,7 +426,7 @@ Resources:
                       roleArn=role_arn,
                       networkConfiguration=get_response['networkConfiguration'],
                       protocolConfiguration=get_response['protocolConfiguration'],
-                      requestHeaderConfiguration={"requestHeaderAllowlist": ["X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actorid"]},
+                      requestHeaderConfiguration={"requestHeaderAllowlist": ["Authorization", "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actorid"]},
                       authorizerConfiguration=get_response['authorizerConfiguration'],
                       environmentVariables=get_response['environmentVariables'],
                   )
