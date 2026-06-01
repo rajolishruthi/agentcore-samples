@@ -61,46 +61,36 @@ export function ChatContainer({ user }: ChatContainerProps) {
     )
   }
 
-  // Detect OAuth consent URLs in the latest assistant message and auto-open popup
+  const [pendingAuthUrl, setPendingAuthUrl] = useState<string | null>(null)
+  const pendingRetryMessage = useRef<string | null>(null)
+
   useEffect(() => {
     if (isStreaming || messages.length === 0) return
-
-    const lastMessage = messages[messages.length - 1]
-    if (lastMessage.role !== 'assistant') return
-
-    const content = lastMessage.content || ''
-    // Detect AgentCore Identity authorization URLs
-    const authUrlMatch = content.match(
+    const last = messages[messages.length - 1]
+    if (last.role !== 'assistant') return
+    const match = last.content?.match(
       /https:\/\/bedrock-agentcore\.[^/]+\.amazonaws\.com\/identities\/oauth2\/authorize\?[^\s"'<)]+/
     )
-
-    if (authUrlMatch) {
-      const authUrl = authUrlMatch[0]
-      console.log('[3LO] Detected consent URL, opening popup:', authUrl)
-
-      // Open in popup
-      const popup = window.open(authUrl, 'gmail_consent', 'width=600,height=700,left=200,top=100')
-
-      if (popup) {
-        // Poll until popup closes
-        const interval = setInterval(() => {
-          if (popup.closed) {
-            clearInterval(interval)
-            console.log('[3LO] Consent popup closed, auto-retrying last user message...')
-
-            // Find the last user message and re-send it
-            const lastUserMessage = [...messages].reverse().find(m => m.role === 'user')
-            if (lastUserMessage && accessToken && user) {
-              // Small delay to let the token vault propagate
-              setTimeout(() => {
-                sendMessage(lastUserMessage.content, accessToken, user.username)
-              }, 2000)
-            }
-          }
-        }, 1000)
-      }
-    }
+    if (!match) return
+    pendingRetryMessage.current = [...messages].reverse().find(m => m.role === 'user')?.content ?? null
+    setPendingAuthUrl(match[0])
   }, [messages, isStreaming])
+
+  const handleConsentClick = () => {
+    if (!pendingAuthUrl) return
+    const popup = window.open(pendingAuthUrl, 'gmail_consent', 'width=600,height=700,left=200,top=100')
+    setPendingAuthUrl(null)
+    if (!popup) return
+    const interval = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(interval)
+        const retryMsg = pendingRetryMessage.current
+        if (retryMsg && accessToken && user) {
+          setTimeout(() => sendMessage(retryMsg, accessToken, user.username), 1500)
+        }
+      }
+    }, 800)
+  }
 
   if (initializationError) {
     return (
@@ -156,6 +146,18 @@ export function ChatContainer({ user }: ChatContainerProps) {
           <div ref={messagesEndRef} />
         </div>
       </div>
+
+      {/* Gmail consent button — shown when agent returns an auth URL */}
+      {pendingAuthUrl && (
+        <div className="flex-shrink-0 px-4 py-2 bg-[#1a1e27] border-t border-[#298dff]">
+          <button
+            onClick={handleConsentClick}
+            className="w-full py-2 px-4 bg-[#298dff] hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            🔑 Click to authorize Gmail access — email will send automatically after
+          </button>
+        </div>
+      )}
 
       {/* Fixed chat input at bottom */}
       <div className="flex-shrink-0">
