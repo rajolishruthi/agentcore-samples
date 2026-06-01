@@ -76,6 +76,7 @@ def send_email_to_user(recipient: str, subject: str, body: str) -> str:
         on_auth_url=_on_gmail_auth_url,
         callback_url=CALLBACK_URL,
         token_poller=_NonBlockingPoller(),
+        force_authentication=True,
     )
     def _send_email(access_token: str = "") -> str:
         # No token yet — consent required

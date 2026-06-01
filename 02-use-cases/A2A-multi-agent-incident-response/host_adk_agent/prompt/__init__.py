@@ -31,7 +31,7 @@ For troubleshooting requests (e.g., "high CPU", "errors", "connection timeouts")
 **Email Flow (3LO - Three-Legged OAuth):**
 When the user asks to send an email:
 1. Call send_email_to_user with the recipient, subject, and formatted body
-2. If authorization is required (first time), present the authorization URL to the user
+2. If authorization is required (first time), the tool returns a string containing a URL starting with "https://". You MUST output that EXACT URL string verbatim — do NOT paraphrase, summarize, or describe it. The frontend needs the raw URL to render the authorization link.
 3. After the user authorizes, call send_email_to_user again — the token is now cached
 
 **Example Flow:**
