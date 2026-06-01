@@ -728,7 +728,8 @@ Resources:
           ContainerUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AgentECRRepository}:${ImageTag}'
       ProtocolConfiguration: HTTP
       RequestHeaderConfiguration :
-        RequestHeaderAllowlist: 
+        RequestHeaderAllowlist:
+          - Authorization
           - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actorid
       AuthorizerConfiguration:
         CustomJWTAuthorizer:
