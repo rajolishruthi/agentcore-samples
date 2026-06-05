@@ -78,18 +78,19 @@ export function ChatContainer({ user }: ChatContainerProps) {
 
   const handleConsentClick = () => {
     if (!pendingAuthUrl) return
-    const popup = window.open(pendingAuthUrl, 'gmail_consent', 'width=600,height=700,left=200,top=100')
+    window.open(pendingAuthUrl, 'gmail_consent', 'width=600,height=700,left=200,top=100')
     setPendingAuthUrl(null)
-    if (!popup) return
-    const interval = setInterval(() => {
-      if (popup.closed) {
+    // Poll the callback server — works regardless of whether browser opened popup or new tab
+    const interval = setInterval(async () => {
+      try {
+        const { granted } = await fetch('http://localhost:9090/oauth2/status').then(r => r.json())
+        if (!granted) return
         clearInterval(interval)
         const retryMsg = pendingRetryMessage.current
-        if (retryMsg && accessToken && user) {
-          setTimeout(() => sendMessage(retryMsg, accessToken, user.username), 1500)
-        }
-      }
-    }, 800)
+        if (retryMsg && accessToken && user)
+          sendMessage(retryMsg, accessToken, user.username)
+      } catch { /* callback server unreachable, keep polling */ }
+    }, 2000)
   }
 
   if (initializationError) {

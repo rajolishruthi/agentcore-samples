@@ -243,3 +243,7 @@ node_modules/
 # Lock files (optional - users regenerate)
 uv.lock
 images/
+
+# Local screen recordings (don't accidentally commit large videos)
+*.mov
+Screen Recording*
