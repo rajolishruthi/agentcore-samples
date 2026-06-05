@@ -1,6 +1,6 @@
-# A2A Multi-Agent Incident Response on Amazon Bedrock AgentCore
+# Zero-Trust Architecture with A2A Multi-Agent/Multi-Cloud on Amazon Bedrock AgentCore
 
-> **Note**: This is an educational sample demonstrating multi-cloud A2A agent orchestration with AgentCore Identity. It is not intended for production use without additional security hardening.
+> **Note**: This is an educational sample demonstrating multi-cloud A2A agent orchestration with AgentCore Identity. It is not intended for production use without additional AgentCore primitives hardening.
 
 A **multi-cloud** implementation of the [Agent-to-Agent (A2A)](https://a2a-protocol.org/latest/) protocol, three specialized agents across AWS and GCP, coordinating in real time to investigate AWS infrastructure incidents, surface remediation steps, and deliver findings by email. A single Cognito User Pool is the trust anchor for all M2M and user-delegated identity across both clouds.
 
