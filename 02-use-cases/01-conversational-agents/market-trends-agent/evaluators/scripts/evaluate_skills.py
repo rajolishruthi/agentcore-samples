@@ -1,16 +1,23 @@
-"""Evaluate Market Trends Agent Skills with AgentCore Evaluations.
+"""Evaluate Market Trends Agent skills with AgentCore Evaluations.
 
-Prerequisite:
+Deploy either supported runtime before running this script:
     uv run python deploy_skill_agent.py --region us-west-2
+    uv run python deploy.py --region us-west-2
 
 Usage:
+    # Native Strands AgentSkills runtime
     uv run python evaluators/scripts/evaluate_skills.py
+
+    # LangGraph generic SKILL.md file-read runtime
+    uv run python evaluators/scripts/evaluate_langgraph_skills.py \
+        --region us-west-2
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 import uuid
@@ -36,6 +43,7 @@ from bedrock_agentcore.evaluation.runner.batch.batch_evaluation_runner import (
     BatchEvaluationRunner,
 )
 from boto3.session import Session  # type: ignore[import-untyped]
+from botocore.config import Config  # type: ignore[import-untyped]
 
 _PROJECT_DIR = Path(__file__).resolve().parents[2]
 _DEFAULT_CONFIG = _PROJECT_DIR / "skill_agent_config.json"
@@ -81,9 +89,19 @@ _EXPECTED_LABELS = {
 }
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(
+    *,
+    default_config: Path = _DEFAULT_CONFIG,
+    default_results: Path = _RESULTS_PATH,
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run AgentCore's built-in skill evaluators")
-    parser.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path, default=default_config)
+    parser.add_argument(
+        "--results",
+        type=Path,
+        default=default_results,
+        help="Output JSON path for the selected runtime",
+    )
     parser.add_argument("--region", default=None)
     parser.add_argument(
         "--wait",
@@ -99,7 +117,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _load_config(path: Path) -> dict[str, Any]:
     if not path.is_file():
-        raise FileNotFoundError(f"Deployment config not found: {path}. Run deploy_skill_agent.py first.")
+        raise FileNotFoundError(f"Deployment config not found: {path}. Deploy the selected skill runtime first.")
     raw_config = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw_config, dict):
         raise TypeError("Deployment config must contain a JSON object")
@@ -180,8 +198,64 @@ def _validate_session_results(
         label = result.get("label")
         value = result.get("value")
         expected = _EXPECTED_LABELS[evaluator_id]
-        if label not in expected or value != expected.get(label):
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+            failures.append(f"{scenario_id} / {evaluator_id}: non-numeric value {value!r}")
+        elif label not in expected or value != expected.get(label):
             failures.append(f"{scenario_id} / {evaluator_id}: unexpected label/value {label!r}/{value!r}")
+    return failures
+
+
+def _validate_batch_result(batch_result: Any) -> list[str]:
+    """Verify all four scenarios and both evaluator summaries completed successfully."""
+    failures: list[str] = []
+    if batch_result.status != "COMPLETED":
+        failures.append(f"batch evaluation ended with status {batch_result.status}")
+
+    if batch_result.agent_invocation_failures:
+        for failure in batch_result.agent_invocation_failures:
+            failures.append(f"batch invocation {failure.scenario_id}: {failure.error_message}")
+
+    summary = batch_result.evaluation_results
+    if summary is None:
+        failures.append("batch evaluation returned no summary")
+        return failures
+
+    expected_sessions = len(_SCENARIOS)
+    if summary.total_number_of_sessions != expected_sessions:
+        failures.append(
+            f"batch evaluation expected {expected_sessions} sessions, received {summary.total_number_of_sessions}"
+        )
+    if summary.number_of_sessions_completed != expected_sessions:
+        failures.append(
+            f"batch evaluation completed {summary.number_of_sessions_completed}/{expected_sessions} sessions"
+        )
+    if summary.number_of_sessions_failed not in {0, None}:
+        failures.append(f"batch evaluation failed {summary.number_of_sessions_failed} sessions")
+    if summary.number_of_sessions_ignored not in {0, None}:
+        failures.append(f"batch evaluation ignored {summary.number_of_sessions_ignored} sessions")
+    if summary.number_of_sessions_in_progress not in {0, None}:
+        failures.append(f"batch evaluation still has {summary.number_of_sessions_in_progress} sessions in progress")
+
+    evaluator_summaries = summary.evaluator_summaries or []
+    by_id = {_evaluator_id({"evaluatorId": evaluator.evaluator_id}): evaluator for evaluator in evaluator_summaries}
+    for evaluator_id in _EVALUATOR_IDS:
+        evaluator = by_id.get(evaluator_id)
+        if evaluator is None:
+            failures.append(f"batch evaluation missing summary for {evaluator_id}")
+            continue
+        if evaluator.total_evaluated != expected_sessions:
+            failures.append(f"batch {evaluator_id} evaluated {evaluator.total_evaluated}/{expected_sessions} sessions")
+        if evaluator.total_failed not in {0, None}:
+            failures.append(f"batch {evaluator_id} reported {evaluator.total_failed} failures")
+        average = evaluator.statistics.average_score if evaluator.statistics else None
+        minimum = 1.0 if evaluator_id == "Builtin.SkillSelectionAccuracy" else 0.75
+        if (
+            isinstance(average, bool)
+            or not isinstance(average, int | float)
+            or not math.isfinite(average)
+            or average < minimum
+        ):
+            failures.append(f"batch {evaluator_id} average {average!r} is below required {minimum}")
     return failures
 
 
@@ -208,8 +282,15 @@ def _dataset() -> Dataset:
     )
 
 
-def main() -> int:
-    args = _parse_args()
+def main(
+    *,
+    default_config: Path = _DEFAULT_CONFIG,
+    default_results: Path = _RESULTS_PATH,
+) -> int:
+    args = _parse_args(
+        default_config=default_config,
+        default_results=default_results,
+    )
     try:
         config = _load_config(args.config)
     except (OSError, TypeError, ValueError) as error:
@@ -221,7 +302,15 @@ def main() -> int:
         print("ERROR: --region must match the deployed runtime region", file=sys.stderr)
         return 1
 
-    runtime_client = boto3.client("bedrock-agentcore", region_name=region)
+    runtime_client = boto3.client(
+        "bedrock-agentcore",
+        region_name=region,
+        config=Config(
+            connect_timeout=10,
+            read_timeout=300,
+            retries={"total_max_attempts": 1, "mode": "standard"},
+        ),
+    )
     evaluation_client = EvaluationClient(region_name=region)
     agent_arn = str(config["agent_arn"])
 
@@ -293,20 +382,19 @@ def main() -> int:
     )
     print(f"  Batch ID: {batch_result.batch_evaluation_id}")
     print(f"  Status: {batch_result.status}")
-    if batch_result.status != "COMPLETED":
-        failures.append(f"batch evaluation ended with status {batch_result.status}")
+    failures.extend(_validate_batch_result(batch_result))
 
     output = {
         "evaluation_client": on_demand_results,
         "batch_evaluation": batch_result.model_dump(),
         "validation_failures": failures,
     }
-    _RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _RESULTS_PATH.write_text(
+    args.results.parent.mkdir(parents=True, exist_ok=True)
+    args.results.write_text(
         json.dumps(output, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
-    print(f"\nResults saved to {_RESULTS_PATH}")
+    print(f"\nResults saved to {args.results}")
 
     if failures:
         print("\nValidation failed:", file=sys.stderr)

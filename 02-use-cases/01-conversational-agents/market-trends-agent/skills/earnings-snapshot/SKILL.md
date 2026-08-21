@@ -13,7 +13,7 @@ Use this skill when a user asks about a company's earnings, valuation metrics, f
 ## Required workflow
 
 1. Retrieve stock data using `get_stock_data` for the requested symbol.
-2. Search for earnings-related news using `search_news` with the stock's sector.
+2. Search for earnings-related news by calling `search_news(query)` with exactly one argument: a query that includes the symbol, company name, and `earnings`. Do not pass `news_source`; keep the runtime default.
 3. Extract the following fundamental metrics from stock data:
    - P/E ratio (compare to sector average: Technology ~34x, Healthcare ~22x, Financials ~13x, Energy ~14x, Consumer Discretionary ~30x, Consumer Staples ~25x)
    - Dividend yield (0% = growth stock; >2% = income stock)

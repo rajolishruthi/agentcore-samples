@@ -1,11 +1,9 @@
-langgraph
-langchain-aws
-langchain-core
-boto3
-playwright
+langgraph==0.6.6
+langchain-aws==0.2.31
+langchain-core==0.3.75
+boto3==1.43.1
+playwright==1.55.0
 bedrock-agentcore==1.8.0
-strands-agents[otel]==1.38.0
 aws-opentelemetry-distro==0.19.0
 opentelemetry-instrumentation-langchain==0.60.0
 wrapt==1.15.0
-jsonschema>=4.24.0,<4.25.0

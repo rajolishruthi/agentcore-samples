@@ -15,7 +15,7 @@ Use this skill when a user asks about price trends, momentum, technical analysis
 
 1. Retrieve current stock data using `get_stock_data` for each symbol in the request.
 2. Retrieve sector data for the stock's sector using `get_sector_data`.
-3. Search for recent news affecting the stock using `search_news` with the stock's sector.
+3. Search for recent news affecting the stock by calling `search_news(query)` with exactly one argument: a query that includes both the symbol and its sector. Do not pass `news_source`; keep the runtime default.
 4. Evaluate momentum: classify the trend as **Uptrend**, **Downtrend**, or **Sideways** based on:
    - Daily price change direction and magnitude
    - Sector trend (outperforming / underperforming / neutral)

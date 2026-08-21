@@ -1274,11 +1274,11 @@ requires-dist = [
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "mypy", marker = "extra == 'dev'" },
-    { name = "opentelemetry-instrumentation-langchain" },
+    { name = "opentelemetry-instrumentation-langchain", specifier = "==0.60.0" },
     { name = "playwright" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "strands-agents", extras = ["otel"], specifier = "==1.38.0" },
-    { name = "wrapt", specifier = "<1.16.0" },
+    { name = "wrapt", specifier = "==1.15.0" },
 ]
 provides-extras = ["dev"]
 

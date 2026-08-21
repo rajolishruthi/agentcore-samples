@@ -27,11 +27,11 @@ dependencies = [
     # LangChain / LangGraph. Emits gen_ai.*, traceloop.entity.* attributes
     # and tool-call spans that code-based evaluators can reason over.
     # See: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html
-    "opentelemetry-instrumentation-langchain",
+    "opentelemetry-instrumentation-langchain==0.60.0",
     # Pin wrapt to avoid TypeError in opentelemetry-instrumentation-langchain:
     # wrapt 1.16.0+ made wrap_function_wrapper() args positional-only, breaking
     # LangchainInstrumentor().instrument() which passes module= as a keyword arg.
-    "wrapt<1.16.0",
+    "wrapt==1.15.0",
     # Pin jsonschema to satisfy openapi-spec-validator 0.8.4's constraint.
     "jsonschema>=4.24.0,<4.25.0",
 ]

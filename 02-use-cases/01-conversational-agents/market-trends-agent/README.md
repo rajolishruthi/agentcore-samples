@@ -47,10 +47,10 @@ See [Systematic Agent Quality Improvement](#systematic-agent-quality-improvement
 ### Prerequisites
 
 - Python 3.10+
-- Node.js 20+ and the [AgentCore CLI](https://github.com/aws/agentcore-cli) — required on a brand-new account to bootstrap the CodeBuild project and S3 source bucket (run `agentcore deploy` once; subsequent re-deploys are handled by `deploy.py`)
-- AWS CLI configured with appropriate credentials
+- [`uv`](https://docs.astral.sh/uv/) for dependency management and ARM64 direct-code packaging
+- AWS CLI configured with credentials that can manage IAM, S3, AgentCore Runtime, Memory, and invoke Amazon Bedrock
 - boto3 ≥ 1.42 — required for the Evaluations control-plane APIs (`list_evaluators`, `create_evaluator`, `create_online_evaluation_config`). `uv sync` installs a compatible version.
-- Access to Amazon Bedrock AgentCore
+- Access to Amazon Bedrock AgentCore and the configured Claude inference profile in the deployment region
 
 ### Installation & Deployment
 
@@ -78,9 +78,10 @@ uv run python deploy.py \
 ```
 
 **Available Options:**
-- `--agent-name`: Name for the agent (default: market_trends_agent)
-- `--role-name`: IAM role name (default: MarketTrendsAgentRole)
-- `--region`: AWS region (default: us-east-1)
+- `--agent-name`: Runtime name (default: `market_trends_langgraph_skills`)
+- `--role-name`: IAM execution role (default: `MarketTrendsLangGraphSkillAgentRole`)
+- `--requirements-file`: Pinned direct-code dependencies (default: `requirements-langgraph.txt`)
+- `--region`: AWS region (default: `us-east-1`)
 - `--skip-checks`: Skip prerequisite validation
 
 4. **Test the Agent**
@@ -125,15 +126,21 @@ After setting up your profile, ask for market insights:
 
 ```bash
 uv run python -c "
-import boto3, json
+import boto3, json, uuid
 client = boto3.client('bedrock-agentcore', region_name='us-west-2')
 with open('.agent_arn', 'r') as f: arn = f.read().strip()
+session_id = f'market-chat-{uuid.uuid4()}'
 print('Market Trends Agent Chat (type quit to exit)')
 while True:
     try:
         msg = input('You: ')
         if msg.lower() in ['quit', 'exit']: break
-        resp = client.invoke_agent_runtime(agentRuntimeArn=arn, payload=json.dumps({'prompt': msg}))
+        resp = client.invoke_agent_runtime(
+            agentRuntimeArn=arn,
+            qualifier='DEFAULT',
+            runtimeSessionId=session_id,
+            payload=json.dumps({'prompt': msg}).encode('utf-8'),
+        )
         print('Agent:', resp['response'].read().decode('utf-8'))
     except KeyboardInterrupt: break
 "
@@ -143,15 +150,23 @@ while True:
 
 ## Agent Skills and Built-In Skill Evaluators
 
-The existing `market_trends_agent.py` runtime remains the primary LangGraph sample with live browser tools and AgentCore Memory. Agent Skills are demonstrated through a separate `market_trends_skill_agent.py` runtime built with native Strands `AgentSkills`. The isolated runtime uses deterministic reference data, has no broker-profile tools or profile state, and does not change the skills plugin or behavior of neighboring deployments.
+The same four workflows are available through two documented skill-loading paths:
+
+- `market_trends_skill_agent.py` uses native Strands `AgentSkills` in an isolated deterministic runtime.
+- `market_trends_agent.py` keeps the existing LangGraph graph, browser tools, and AgentCore Memory, and loads the same manifests through the generic `read_skill(path)` file-read tool.
+
+AgentCore Evaluations recognizes the LangGraph call as a skill load when the tool argument ends in `/SKILL.md` and the tool result contains the complete, well-formed manifest. Generic file-read agents do not emit an available-skills catalog; `Builtin.SkillSelectionAccuracy` still runs with an empty catalog and judges the invoked skill against the request and conversation context.
 
 ### Evaluation Flow
 
 ```mermaid
 flowchart LR
-    U[Evaluation scenarios] --> R[AgentCore Runtime]
-    R --> S[Native Strands AgentSkills]
-    R --> CW[Unified runtime log group]
+    U[Evaluation scenarios] --> SR[Strands Runtime]
+    U --> LR[LangGraph Runtime]
+    SR --> NS[Native AgentSkills tool]
+    LR --> FR[Generic read_skill tool]
+    NS --> CW[Unified runtime log group]
+    FR --> CW
     CW --> EC[EvaluationClient]
     CW --> BR[BatchEvaluationRunner]
     EC --> E[Managed skill evaluators]
@@ -171,6 +186,8 @@ Each skill is a reusable `SKILL.md` workflow under `skills/`. Its `allowed-tools
 
 General market-overview requests continue to use ordinary market tools directly and should not load a skill. Broker-profile persistence remains a capability of the primary LangGraph sample through AgentCore Memory; it is intentionally absent from the isolated deterministic skill runtime.
 
+For the LangGraph runtime, stock and news tools remain live-browser-first. If an upstream browser source is unavailable, the wrapper returns clearly labeled deterministic reference data for the evaluation tickers and query categories. This keeps the documented workflow executable and repeatable without presenting fallback values as live market data.
+
 ### What the Evaluators Measure
 
 | Managed evaluator | Question answered | AWS label/value contract | Sample acceptance floor |
@@ -180,7 +197,7 @@ General market-overview requests continue to use ordinary market tools directly 
 
 The exact labels and values above are the managed evaluator contracts. The acceptance floors are policy chosen by this sample, not AWS-mandated thresholds. The runner locally fails any result that is malformed, uses an unknown label, has a non-finite/non-numeric value (including a Boolean), has a label/value mismatch, or falls below the sample floor.
 
-Both evaluators operate at the **tool-call level**. Native Strands `AgentSkills` emits the `skills` tool trace that the managed evaluators inspect. The sample calls these AWS-managed evaluators by ID and does not create, update, or delete evaluator resources.
+Both evaluators operate at the **tool-call level**. Native Strands emits a skill-tool trace; LangGraph emits an OpenTelemetry tool span for `read_skill`. AgentCore identifies the latter from the canonical `/SKILL.md` argument and complete manifest result. The sample calls these AWS-managed evaluators by ID and does not create, update, or delete evaluator resources.
 
 The evaluation script demonstrates both documented SDK interfaces:
 
@@ -210,12 +227,28 @@ The deployment validates the four `SKILL.md` files, packages the native Strands 
 
 The script intentionally creates one isolated deployment. If `skill_agent_config.json` already exists, clean up the recorded resources before deploying again.
 
-### Run the Skill Evaluators
+### Deploy the LangGraph Skill Runtime
 
-Run all four positive scenarios and the no-skill control:
+Deploy or update the existing LangGraph runtime with direct-code packaging:
 
 ```bash
+uv sync --locked
+uv run python deploy.py --region us-west-2
+```
+
+The deployer builds a pinned Python 3.13 ARM64 ZIP from `requirements-langgraph.txt`, includes `market_trends_agent.py`, `tools/`, and all four `skills/` manifests, uploads it to a private encrypted S3 bucket, enables `UNIFIED_TRACES_DESTINATION_ENABLED=true`, waits for `READY`, and writes `langgraph_skill_agent_config.json`.
+
+### Run the Skill Evaluators
+
+Run all four positive scenarios and the no-skill control for either deployment:
+
+```bash
+# Native Strands runtime
 uv run python evaluators/scripts/evaluate_skills.py
+
+# LangGraph generic file-read runtime
+uv run python evaluators/scripts/evaluate_langgraph_skills.py \
+  --region us-west-2
 ```
 
 The baseline checks these routes:
@@ -231,7 +264,7 @@ Telemetry ingestion is asynchronous; use `--wait 240` if the default 180 seconds
 1. Invokes all four skill scenarios and a no-skill market-overview control.
 2. Uses `EvaluationClient.run(...)` for per-session scores.
 3. Uses `BatchEvaluationRunner` with `log_group_names=[config["cw_log_group"]]` for the four-scenario dataset.
-4. Saves results to `evaluators/results/skill_evaluation_results.json` and exits nonzero if validation fails.
+4. Saves results to the runtime-specific path under `evaluators/results/` and exits nonzero if validation fails.
 
 A successful on-demand run includes output similar to:
 
@@ -242,12 +275,12 @@ no-skill-market-overview         Builtin.SkillSelectionAccuracy       SKIPPED (0
 no-skill-market-overview         Builtin.SkillInstructionFollowing    SKIPPED (0 results)
 ```
 
-### Clean Up the Skill Runtime
+### Clean Up a Skill Runtime
 
-The generated config contains the exact runtime, role, policy, bucket, key, region, and unified runtime log group used by this isolated deployment. Load those values before deleting resources:
+Each generated config contains the exact runtime, role, policy, bucket, key, region, and unified runtime log group for that deployment. Select `skill_agent_config.json` for Strands or `langgraph_skill_agent_config.json` for LangGraph before deleting resources:
 
 ```bash
-CONFIG=skill_agent_config.json
+CONFIG=${CONFIG:-skill_agent_config.json}
 REGION=$(uv run python -c 'import json, sys; print(json.load(open(sys.argv[1]))["region"])' "$CONFIG")
 AGENT_ID=$(uv run python -c 'import json, sys; print(json.load(open(sys.argv[1]))["agent_id"])' "$CONFIG")
 ROLE_NAME=$(uv run python -c 'import json, sys; print(json.load(open(sys.argv[1]))["role_name"])' "$CONFIG")

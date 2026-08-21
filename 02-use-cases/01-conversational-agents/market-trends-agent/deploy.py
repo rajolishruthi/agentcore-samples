@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
 Complete Market Trends Agent Deployment Script
-Handles IAM role creation, permissions, container deployment, and agent setup
+Handles IAM role creation, permissions, direct-code packaging, and agent setup
 
 IAM Role Setup
 --------------
 The execution role trusts bedrock-agentcore.amazonaws.com with a condition
-scoped to A/B test resources in your account:
+scoped to Runtime resources in your account:
 
     "Condition": {
         "StringEquals": {"aws:SourceAccount": "<account-id>"},
-        "ArnLike":      {"aws:SourceArn": "arn:aws:bedrock-agentcore:*:<account-id>:*"}
+        "ArnLike":      {"aws:SourceArn": "arn:aws:bedrock-agentcore:*:<account-id>:runtime/*"}
     }
 
 The permissions policy uses explicit least-privilege statements:
 
   BedrockModelInvocation     — bedrock:InvokeModel* scoped to foundation models
-  ECRImageAccess             — ecr:BatchGetImage, GetDownloadUrlForLayer
+  DirectCodeArtifactAccess — s3:GetObject scoped to this sample's deployment bucket
   CloudWatch Logs (runtime)  — CreateLogGroup/Stream, PutLogEvents scoped to runtimes/*
   XRay                       — PutTraceSegments, PutTelemetryRecords, GetSamplingRules/Targets
   GetAgentAccessToken        — GetWorkloadAccessToken* scoped to workload identity
@@ -35,17 +35,21 @@ The permissions policy uses explicit least-privilege statements:
   ABTestCloudWatchLogs       — CreateLogGroup, CreateLogStream, PutLogEvents,
                                DescribeLogGroups/Streams, DescribeIndexPolicies, PutIndexPolicy,
                                StartQuery, GetQueryResults, StopQuery, FilterLogEvents, GetLogEvents
-                               scoped to evaluations/*, runtimes/*, and aws/spans log groups
+                               scoped to evaluations/* and runtimes/* log groups
 """
 
 import argparse
 import json
 import logging
-import boto3
+import shutil
+import subprocess
 import time
+import zipfile
 from pathlib import Path
+from typing import Any
 
-from botocore.exceptions import ClientError
+import boto3  # type: ignore[import-untyped]
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -55,7 +59,7 @@ logger = logging.getLogger(__name__)
 class MarketTrendsAgentDeployer:
     """Complete deployer for Market Trends Agent"""
 
-    def __init__(self, region: str = "us-east-1"):
+    def __init__(self, region: str = "us-east-1") -> None:
         self.region = region
         self.iam_client = boto3.client("iam", region_name=region)
         self.ssm_client = boto3.client("ssm", region_name=region)
@@ -64,7 +68,7 @@ class MarketTrendsAgentDeployer:
         """Create IAM execution role with least-privilege permissions.
 
         Trust policy: bedrock-agentcore.amazonaws.com, conditioned on
-        aws:SourceAccount and aws:SourceArn scoped to ab-test/* resources.
+        aws:SourceAccount and aws:SourceArn scoped to runtime/* resources.
 
         Permissions: explicit statements for runtime, memory, browser, SSM,
         A/B test gateway/eval/bundle reads, and CloudWatch Logs score aggregation.
@@ -87,7 +91,7 @@ class MarketTrendsAgentDeployer:
                             "aws:SourceAccount": account_id,
                         },
                         "ArnLike": {
-                            "aws:SourceArn": f"arn:aws:bedrock-agentcore:*:{account_id}:ab-test/*",
+                            "aws:SourceArn": f"arn:aws:bedrock-agentcore:*:{account_id}:runtime/*",
                         },
                     },
                 }
@@ -111,10 +115,10 @@ class MarketTrendsAgentDeployer:
                     ],
                 },
                 {
-                    "Sid": "ECRImageAccess",
+                    "Sid": "DirectCodeArtifactAccess",
                     "Effect": "Allow",
-                    "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-                    "Resource": [f"arn:aws:ecr:{self.region}:{account_id}:repository/*"],
+                    "Action": ["s3:GetObject"],
+                    "Resource": [f"arn:aws:s3:::bedrock-agentcore-code-{account_id}-{self.region}/*"],
                 },
                 {
                     "Effect": "Allow",
@@ -129,17 +133,17 @@ class MarketTrendsAgentDeployer:
                     "Resource": [f"arn:aws:logs:{self.region}:{account_id}:log-group:*"],
                 },
                 {
+                    "Sid": "ManageRuntimeTelemetryPolicy",
+                    "Effect": "Allow",
+                    "Action": ["logs:PutResourcePolicy"],
+                    "Resource": "*",
+                },
+                {
                     "Effect": "Allow",
                     "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
                     "Resource": [
                         f"arn:aws:logs:{self.region}:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
                     ],
-                },
-                {
-                    "Sid": "ECRTokenAccess",
-                    "Effect": "Allow",
-                    "Action": ["ecr:GetAuthorizationToken"],
-                    "Resource": "*",
                 },
                 {
                     "Effect": "Allow",
@@ -258,8 +262,8 @@ class MarketTrendsAgentDeployer:
                     "Resource": [
                         f"arn:aws:logs:*:{account_id}:log-group:/aws/bedrock-agentcore/evaluations/*",
                         f"arn:aws:logs:*:{account_id}:log-group:/aws/bedrock-agentcore/evaluations/*:*",
-                        f"arn:aws:logs:*:{account_id}:log-group:aws/spans",
-                        f"arn:aws:logs:*:{account_id}:log-group:aws/spans:*",
+                        f"arn:aws:logs:*:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/*",
+                        f"arn:aws:logs:*:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/*:*",
                     ],
                 },
             ],
@@ -282,7 +286,7 @@ class MarketTrendsAgentDeployer:
                 PolicyDocument=json.dumps(execution_policy),
             )
 
-            role_arn = role_response["Role"]["Arn"]
+            role_arn = str(role_response["Role"]["Arn"])
             logger.info(f"✅ Created IAM role with ARN: {role_arn}")
 
             # Wait for role to propagate
@@ -294,8 +298,12 @@ class MarketTrendsAgentDeployer:
         except self.iam_client.exceptions.EntityAlreadyExistsException:
             logger.info(f"📋 IAM role {role_name} already exists, using existing role")
 
-            # Update the existing role with comprehensive permissions
-            logger.info("📋 Updating existing role with comprehensive permissions...")
+            # Reconcile both trust and permissions for an existing role.
+            logger.info("📋 Updating existing role trust and permissions...")
+            self.iam_client.update_assume_role_policy(
+                RoleName=role_name,
+                PolicyDocument=json.dumps(trust_policy),
+            )
             self.iam_client.put_role_policy(
                 RoleName=role_name,
                 PolicyName="MarketTrendsAgentComprehensivePolicy",
@@ -303,7 +311,7 @@ class MarketTrendsAgentDeployer:
             )
 
             role_response = self.iam_client.get_role(RoleName=role_name)
-            return role_response["Role"]["Arn"]
+            return str(role_response["Role"]["Arn"])
 
         except Exception as e:
             logger.error(f"❌ Failed to create IAM role: {e}")
@@ -322,7 +330,7 @@ class MarketTrendsAgentDeployer:
             param_name = "/bedrock-agentcore/market-trends-agent/memory-arn"
             try:
                 response = self.ssm_client.get_parameter(Name=param_name)
-                existing_memory_arn = response["Parameter"]["Value"]
+                existing_memory_arn = str(response["Parameter"]["Value"])
                 logger.info(f"✅ Found existing memory ARN in SSM: {existing_memory_arn}")
                 return existing_memory_arn
             except self.ssm_client.exceptions.ParameterNotFound:
@@ -333,7 +341,7 @@ class MarketTrendsAgentDeployer:
                 memories = memory_client.list_memories()
                 for memory in memories:
                     if memory.get("name") == memory_name and memory.get("status") == "ACTIVE":
-                        memory_arn = memory["arn"]
+                        memory_arn = str(memory["arn"])
                         logger.info(f"✅ Found existing active memory: {memory_arn}")
 
                         # Store in SSM for future use
@@ -346,8 +354,8 @@ class MarketTrendsAgentDeployer:
                         )
                         logger.info("💾 Stored existing memory ARN in SSM")
                         return memory_arn
-            except Exception as e:
-                logger.warning(f"Error checking existing memories: {e}")
+            except Exception as error:  # noqa: BLE001 - discovery failure falls back to create
+                logger.warning("Error checking existing memories: %s", error)
 
             # Create new memory
             logger.info("🧠 Creating new AgentCore Memory...")
@@ -378,7 +386,7 @@ class MarketTrendsAgentDeployer:
                 poll_interval=10,
             )
 
-            memory_arn = memory["arn"]
+            memory_arn = str(memory["arn"])
             logger.info(f"✅ Memory created successfully: {memory_arn}")
 
             # Store memory ARN in SSM Parameter Store
@@ -397,234 +405,362 @@ class MarketTrendsAgentDeployer:
             logger.error(f"❌ Failed to create memory: {e}")
             raise
 
-    def _trigger_codebuild(self, agent_name: str) -> str:
-        """Start the CodeBuild container build and wait for completion.
+    def _build_direct_code_package(
+        self,
+        entrypoint: str,
+        requirements_file: str,
+    ) -> Path:
+        """Build a Python 3.13 ARM64 package for AgentCore direct deploy."""
+        build_dir = Path(".langgraph-agent-build")
+        package_dir = build_dir / "package"
+        if build_dir.exists():
+            shutil.rmtree(build_dir)
+        package_dir.mkdir(parents=True)
 
-        Returns the ECR image URI on success. Raises RuntimeError on failure.
-        The CodeBuild project is created by ``agentcore deploy`` on first run.
-        """
-        codebuild = boto3.client("codebuild", region_name=self.region)
-        project_name = f"bedrock-agentcore-{agent_name}-builder"
+        command = [
+            "uv",
+            "pip",
+            "install",
+            "--python-platform",
+            "aarch64-manylinux2014",
+            "--python-version",
+            "3.13",
+            "--target",
+            str(package_dir),
+            "--only-binary=:all:",
+            "--no-compile",
+            "-r",
+            requirements_file,
+        ]
+        logger.info("Installing ARM64 dependencies for direct code deployment...")
+        subprocess.run(command, check=True)
+
+        shutil.copy2(entrypoint, package_dir / Path(entrypoint).name)
+        shutil.copytree("tools", package_dir / "tools", dirs_exist_ok=True)
+        shutil.copytree("skills", package_dir / "skills", dirs_exist_ok=True)
+
+        # Console scripts installed into a target directory inherit the build
+        # interpreter's absolute shebang. AgentCore does not have that local
+        # virtualenv path, so make the OTEL launcher portable before archiving.
+        otel_launcher = package_dir / "bin" / "opentelemetry-instrument"
+        if not otel_launcher.is_file():
+            raise RuntimeError("ARM64 package is missing bin/opentelemetry-instrument")
+        launcher_lines = otel_launcher.read_text(encoding="utf-8").splitlines()
+        if not launcher_lines:
+            raise RuntimeError("bin/opentelemetry-instrument is empty")
+        launcher_lines[0] = "#!/usr/bin/env python3"
+        otel_launcher.write_text("\n".join(launcher_lines) + "\n", encoding="utf-8")
+        otel_launcher.chmod(0o755)
+
+        for cache_dir in package_dir.rglob("__pycache__"):
+            shutil.rmtree(cache_dir)
+        for bytecode_file in package_dir.rglob("*.py[co]"):
+            bytecode_file.unlink()
+
+        files = [path for path in package_dir.rglob("*") if path.is_file()]
+        uncompressed_size = sum(path.stat().st_size for path in files)
+        if uncompressed_size > 750 * 1024 * 1024:
+            raise RuntimeError("Direct-code package exceeds the 750 MB uncompressed limit")
+
+        archive = build_dir / "market_trends_langgraph_agent.zip"
+        with zipfile.ZipFile(
+            archive,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as package:
+            for path in files:
+                package.write(path, path.relative_to(package_dir))
+
+        if archive.stat().st_size > 250 * 1024 * 1024:
+            raise RuntimeError("Direct-code package exceeds the 250 MB compressed limit")
+        logger.info(
+            "Built direct-code package: %s (%.1f MB compressed, %.1f MB uncompressed)",
+            archive,
+            archive.stat().st_size / (1024 * 1024),
+            uncompressed_size / (1024 * 1024),
+        )
+        return archive
+
+    def _upload_direct_code_package(
+        self,
+        agent_name: str,
+        archive: Path,
+    ) -> tuple[str, str]:
+        """Create a private artifact bucket if needed and upload the package."""
+        account_id = boto3.client("sts").get_caller_identity()["Account"]
+        bucket = f"bedrock-agentcore-code-{account_id}-{self.region}"
+        key = f"{agent_name}/{archive.name}"
+        s3 = boto3.client("s3", region_name=self.region)
 
         try:
-            projects = codebuild.batch_get_projects(names=[project_name])
-            if not projects.get("projects"):
-                raise RuntimeError(
-                    f"CodeBuild project '{project_name}' not found.\n"
-                    "Run 'agentcore deploy' once to bootstrap the build pipeline, "
-                    "then re-run this script for subsequent deploys."
-                )
-        except Exception as exc:
-            if "CodeBuild project" in str(exc):
+            s3.head_bucket(Bucket=bucket, ExpectedBucketOwner=account_id)
+        except ClientError as error:
+            code = str(error.response.get("Error", {}).get("Code", ""))
+            if code not in {"404", "NoSuchBucket", "NotFound"}:
                 raise
-            raise RuntimeError(f"Could not reach CodeBuild: {exc}") from exc
+            create_args: dict[str, Any] = {"Bucket": bucket}
+            if self.region != "us-east-1":
+                create_args["CreateBucketConfiguration"] = {"LocationConstraint": self.region}
+            s3.create_bucket(**create_args)
+            s3.put_public_access_block(
+                Bucket=bucket,
+                PublicAccessBlockConfiguration={
+                    "BlockPublicAcls": True,
+                    "IgnorePublicAcls": True,
+                    "BlockPublicPolicy": True,
+                    "RestrictPublicBuckets": True,
+                },
+            )
+            s3.put_bucket_encryption(
+                Bucket=bucket,
+                ServerSideEncryptionConfiguration={
+                    "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
+                },
+            )
 
-        logger.info("Starting CodeBuild project: %s", project_name)
-        build_resp = codebuild.start_build(projectName=project_name)
-        build_id = build_resp["build"]["id"]
-        logger.info("Build started: %s — waiting for completion...", build_id)
+        with archive.open("rb") as package:
+            s3.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=package,
+                ExpectedBucketOwner=account_id,
+                ServerSideEncryption="AES256",
+            )
+        logger.info("Uploaded direct-code package to s3://%s/%s", bucket, key)
+        return bucket, key
 
-        # Poll until the build finishes (max ~20 min).
-        import time as _time
-
-        for _ in range(120):
-            _time.sleep(10)
-            builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
-            status = builds[0]["buildStatus"] if builds else "UNKNOWN"
-            if status == "SUCCEEDED":
-                break
-            if status not in ("IN_PROGRESS",):
-                raise RuntimeError(f"CodeBuild failed with status: {status}")
-
-        account_id = boto3.client("sts").get_caller_identity()["Account"]
-        ecr_uri = f"{account_id}.dkr.ecr.{self.region}.amazonaws.com/bedrock-agentcore-{agent_name}:latest"
-        logger.info("Container ready at: %s", ecr_uri)
-        return ecr_uri
+    def _wait_until_ready(
+        self,
+        control: Any,
+        runtime_id: str,
+    ) -> dict[str, Any]:
+        """Wait for a runtime create or update to reach READY."""
+        terminal_statuses = {"CREATE_FAILED", "UPDATE_FAILED", "FAILED"}
+        for _ in range(40):
+            runtime: dict[str, Any] = control.get_agent_runtime(agentRuntimeId=runtime_id)
+            status = runtime.get("status")
+            logger.info("Runtime status: %s", status)
+            if status == "READY":
+                return runtime
+            if status in terminal_statuses:
+                raise RuntimeError(runtime.get("failureReason", f"Runtime reached {status}"))
+            time.sleep(15)
+        raise TimeoutError("Runtime did not reach READY within 10 minutes")
 
     def _ensure_runtime(
         self,
         agent_name: str,
         execution_role_arn: str,
-        ecr_image_uri: str,
-    ) -> str:
-        """Create or update the AgentCore runtime via bedrock-agentcore-control."""
+        s3_bucket: str,
+        s3_key: str,
+        entrypoint: str,
+    ) -> dict[str, Any]:
+        """Create or update a direct-code runtime with unified telemetry."""
         control = boto3.client("bedrock-agentcore-control", region_name=self.region)
-        artifact = {"containerConfiguration": {"containerUri": ecr_image_uri}}
+        artifact = {
+            "codeConfiguration": {
+                "code": {"s3": {"bucket": s3_bucket, "prefix": s3_key}},
+                "runtime": "PYTHON_3_13",
+                "entryPoint": ["opentelemetry-instrument", Path(entrypoint).name],
+            }
+        }
+        environment = {
+            "AWS_REGION": self.region,
+            "UNIFIED_TRACES_DESTINATION_ENABLED": "true",
+        }
+        lifecycle = {
+            "idleRuntimeSessionTimeout": 300,
+            "maxLifetime": 1800,
+        }
 
-        # Check whether a runtime with this name already exists.
-        try:
-            paginator = control.get_paginator("list_agent_runtimes")
-            for page in paginator.paginate():
-                for rt in page.get("agentRuntimeSummaries", []):
-                    if rt.get("agentRuntimeName") == agent_name:
-                        runtime_id = rt["agentRuntimeId"]
-                        logger.info("Updating existing runtime: %s", runtime_id)
-                        control.update_agent_runtime(
-                            agentRuntimeId=runtime_id,
-                            agentRuntimeArtifact=artifact,
-                            roleArn=execution_role_arn,
-                        )
-                        return rt["agentRuntimeArn"]
-        except ClientError:
-            pass
+        paginator = control.get_paginator("list_agent_runtimes")
+        for page in paginator.paginate():
+            for runtime in page.get("agentRuntimes", []):
+                if runtime.get("agentRuntimeName") != agent_name:
+                    continue
+                runtime_id = runtime["agentRuntimeId"]
+                logger.info("Updating existing runtime: %s", runtime_id)
+                control.update_agent_runtime(
+                    agentRuntimeId=runtime_id,
+                    agentRuntimeArtifact=artifact,
+                    roleArn=execution_role_arn,
+                    networkConfiguration={"networkMode": "PUBLIC"},
+                    protocolConfiguration={"serverProtocol": "HTTP"},
+                    lifecycleConfiguration=lifecycle,
+                    environmentVariables=environment,
+                )
+                return self._wait_until_ready(control, runtime_id)
 
-        # No existing runtime — create one.
         logger.info("Creating new AgentCore runtime: %s", agent_name)
-        resp = control.create_agent_runtime(
+        created = control.create_agent_runtime(
             agentRuntimeName=agent_name,
             agentRuntimeArtifact=artifact,
             roleArn=execution_role_arn,
             networkConfiguration={"networkMode": "PUBLIC"},
             protocolConfiguration={"serverProtocol": "HTTP"},
+            lifecycleConfiguration=lifecycle,
+            environmentVariables=environment,
         )
-        return resp["agentRuntimeArn"]
+        return self._wait_until_ready(control, created["agentRuntimeId"])
 
     def deploy_agent(
         self,
         agent_name: str,
         role_name: str = "MarketTrendsAgentRole",
         entrypoint: str = "market_trends_agent.py",
-        requirements_file: str = None,
-    ) -> str:
-        """Deploy the Market Trends Agent using the AgentCore SDK and boto3.
-
-        Steps:
-          1. Create AgentCore Memory (bedrock_agentcore SDK).
-          2. Create the IAM execution role (boto3).
-          3. Build and push the container via CodeBuild (boto3).
-          4. Create or update the AgentCore runtime (bedrock-agentcore-control).
-        """
+        requirements_file: str = "requirements-langgraph.txt",
+    ) -> str | None:
+        """Package and deploy the LangGraph Market Trends Agent."""
         try:
-            logger.info("Starting Market Trends Agent Deployment")
+            logger.info("Starting Market Trends Agent direct-code deployment")
             logger.info("  Agent Name : %s", agent_name)
             logger.info("  Region     : %s", self.region)
             logger.info("  Entrypoint : %s", entrypoint)
 
-            # Step 1: Create AgentCore Memory (uses bedrock_agentcore SDK)
             memory_arn = self.create_agentcore_memory()
-
-            # Step 2: Create execution role (uses boto3 IAM)
             execution_role_arn = self.create_execution_role(role_name)
-
-            # Step 3: Build container via CodeBuild
-            ecr_image_uri = self._trigger_codebuild(agent_name)
-
-            # Step 4: Create / update the runtime via bedrock-agentcore-control
-            runtime_arn = self._ensure_runtime(agent_name, execution_role_arn, ecr_image_uri)
+            archive = self._build_direct_code_package(entrypoint, requirements_file)
+            s3_bucket, s3_key = self._upload_direct_code_package(
+                agent_name,
+                archive,
+            )
+            runtime = self._ensure_runtime(
+                agent_name,
+                execution_role_arn,
+                s3_bucket,
+                s3_key,
+                entrypoint,
+            )
+            runtime_arn = str(runtime["agentRuntimeArn"])
+            agent_id = str(runtime["agentRuntimeId"])
+            runtime_name = str(runtime["agentRuntimeName"])
+            log_group = f"/aws/bedrock-agentcore/runtimes/{agent_id}-DEFAULT"
 
             arn_file = Path(".agent_arn")
-            arn_file.write_text(runtime_arn)
+            arn_file.write_text(runtime_arn, encoding="utf-8")
+            config_file = Path("langgraph_skill_agent_config.json")
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "agent_id": agent_id,
+                        "agent_arn": runtime_arn,
+                        "cw_log_group": log_group,
+                        "service_name": f"{runtime_name}.DEFAULT",
+                        "region": self.region,
+                        "role_name": role_name,
+                        "policy_name": "MarketTrendsAgentComprehensivePolicy",
+                        "s3_bucket": s3_bucket,
+                        "s3_key": s3_key,
+                        "memory_arn": memory_arn,
+                        "skills": [
+                            "earnings-snapshot",
+                            "portfolio-risk",
+                            "sector-rotation",
+                            "trend-analysis",
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
-            agent_id = runtime_arn.split("/")[-1]
-            log_group = f"/aws/bedrock-agentcore/runtimes/{agent_id}-DEFAULT"
-            logger.info("Market Trends Agent deployed successfully!")
+            logger.info("Market Trends Agent deployed successfully")
             logger.info("  Runtime ARN : %s", runtime_arn)
             logger.info("  Memory ARN  : %s", memory_arn)
-            logger.info("  Region      : %s", self.region)
             logger.info("  Exec Role   : %s", execution_role_arn)
-            logger.info("  ARN saved to: %s", arn_file)
+            logger.info("  Eval config : %s", config_file)
             logger.info("  CW Logs     : %s", log_group)
-            logger.info("Next steps:")
-            logger.info("  Test  : uv run python test_agent.py")
-            logger.info("  Evals : uv run python evaluators/scripts/deploy.py")
-
+            logger.info(
+                "  Evaluate    : uv run python evaluators/scripts/evaluate_skills.py "
+                "--config %s --results "
+                "evaluators/results/langgraph_skill_evaluation_results.json",
+                config_file,
+            )
             return runtime_arn
-
-        except RuntimeError as exc:
-            logger.error("Deployment failed: %s", exc)
-            return None
-        except Exception as exc:
-            import traceback
-
-            logger.error("Deployment failed: %s\n%s", exc, traceback.format_exc())
+        except Exception:
+            logger.exception("Deployment failed")
             return None
 
 
-def check_prerequisites():
-    """Check if all prerequisites are met"""
-    logger.info("🔍 Checking prerequisites...")
-
-    # Check if required files exist
+def check_prerequisites(requirements_file: str) -> bool:
+    """Check local files, uv, and AWS credentials before deployment."""
     required_files = [
         "market_trends_agent.py",
+        requirements_file,
         "tools/browser_tool.py",
         "tools/broker_card_tools.py",
         "tools/memory_tools.py",
+        "tools/skill_tools.py",
         "tools/__init__.py",
+        "skills/trend-analysis/SKILL.md",
+        "skills/sector-rotation/SKILL.md",
+        "skills/earnings-snapshot/SKILL.md",
+        "skills/portfolio-risk/SKILL.md",
     ]
-
-    # Check for dependency files (either pyproject.toml or requirements.txt)
-    has_pyproject = Path("pyproject.toml").exists()
-    has_requirements = Path("requirements.txt").exists()
-
-    if not has_pyproject and not has_requirements:
-        logger.error("❌ No dependency file found (pyproject.toml or requirements.txt)")
-        return False
-
-    if has_pyproject:
-        logger.info("✅ Found pyproject.toml - will use uv for dependency management")
-    elif has_requirements:
-        logger.info("✅ Found requirements.txt - will use pip for dependency management")
-
-    missing_files = []
-    for file in required_files:
-        if not Path(file).exists():
-            missing_files.append(file)
-
+    missing_files = [file for file in required_files if not Path(file).is_file()]
     if missing_files:
-        logger.error(f"❌ Missing required files: {missing_files}")
+        logger.error("Missing required files: %s", missing_files)
         return False
-
-    # Note: Docker/Podman not required - AgentCore uses AWS CodeBuild for container building
-    logger.info("✅ Container building will use AWS CodeBuild (no local Docker required)")
-
-    # Check AWS credentials
+    if shutil.which("uv") is None:
+        logger.error("uv is required to build the ARM64 deployment package")
+        return False
     try:
-        boto3.client("sts").get_caller_identity()
-        logger.info("✅ AWS credentials configured")
-    except Exception as e:
-        logger.error(f"❌ AWS credentials not configured: {e}")
+        identity = boto3.client("sts").get_caller_identity()
+    except Exception as error:  # noqa: BLE001
+        logger.error("AWS credentials are not configured: %s", error)
         return False
-
-    logger.info("✅ All prerequisites met")
+    logger.info("AWS credentials configured for account %s", identity["Account"])
+    logger.info("Direct-code deployment does not require Docker or CodeBuild")
     return True
 
 
-def main():
-    """Main deployment function"""
+def main() -> int:
+    """Deploy the LangGraph Market Trends Agent."""
     parser = argparse.ArgumentParser(description="Deploy Market Trends Agent to Amazon Bedrock AgentCore Runtime")
     parser.add_argument(
         "--agent-name",
-        default="market_trends_agent",
-        help="Name for the agent (default: market_trends_agent)",
+        default="market_trends_langgraph_skills",
+        help="Runtime name (default: market_trends_langgraph_skills)",
     )
     parser.add_argument(
         "--role-name",
-        default="MarketTrendsAgentRole",
-        help="IAM role name (default: MarketTrendsAgentRole)",
+        default="MarketTrendsLangGraphSkillAgentRole",
+        help="IAM role name (default: MarketTrendsLangGraphSkillAgentRole)",
     )
-    parser.add_argument("--region", default="us-east-1", help="AWS region (default: us-east-1)")
-    parser.add_argument("--skip-checks", action="store_true", help="Skip prerequisite checks")
-
+    parser.add_argument(
+        "--requirements-file",
+        default="requirements-langgraph.txt",
+        help="Pinned direct-code dependency file",
+    )
+    parser.add_argument(
+        "--region",
+        default="us-east-1",
+        help="AWS region (default: us-east-1)",
+    )
+    parser.add_argument(
+        "--skip-checks",
+        action="store_true",
+        help="Skip prerequisite checks",
+    )
     args = parser.parse_args()
 
-    # Check prerequisites
-    if not args.skip_checks and not check_prerequisites():
-        logger.error("❌ Prerequisites not met. Fix issues above or use --skip-checks")
-        exit(1)
+    if not args.skip_checks and not check_prerequisites(args.requirements_file):
+        logger.error("Prerequisites not met. Fix issues above or use --skip-checks")
+        return 1
 
-    # Create deployer and deploy
     deployer = MarketTrendsAgentDeployer(region=args.region)
-
-    runtime_arn = deployer.deploy_agent(agent_name=args.agent_name, role_name=args.role_name)
-
-    if runtime_arn:
-        logger.info("\n🎯 Deployment completed successfully!")
-        logger.info("Run 'python test_agent.py' to test your deployed agent.")
-    else:
-        logger.error("❌ Deployment failed")
-        exit(1)
+    runtime_arn = deployer.deploy_agent(
+        agent_name=args.agent_name,
+        role_name=args.role_name,
+        requirements_file=args.requirements_file,
+    )
+    if not runtime_arn:
+        return 1
+    logger.info("Deployment completed successfully")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,32 +1,17 @@
-from langgraph.graph import StateGraph, MessagesState
-from langgraph.prebuilt import ToolNode, tools_condition
-from langchain_core.messages import HumanMessage, SystemMessage
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from tools import get_stock_data, search_news
-from tools import (
-    parse_broker_profile_from_message,
-    generate_market_summary_for_broker,
-    get_broker_card_template,
-    collect_broker_preferences_interactively,
-)
-from tools import get_memory_from_ssm, create_memory_tools
-from datetime import datetime
 import logging
+from datetime import datetime, timezone
+from typing import Any
 
-# Enable LangChain / LangGraph OpenTelemetry instrumentation so AgentCore
-# Observability captures tool-call spans, gen_ai.prompt.*, gen_ai.completion.*,
-# and trace structure. AgentCore Runtime boots agents under the ADOT
-# auto-instrumentor, but framework-level instrumentors still need to be
-# registered explicitly. See:
-# https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html
-try:
-    from opentelemetry.instrumentation.langchain import LangchainInstrumentor
+from opentelemetry.instrumentation.langchain import LangchainInstrumentor
 
-    LangchainInstrumentor().instrument()
-except Exception:  # pragma: no cover — never block agent startup on instrumentation
-    logging.getLogger(__name__).exception(
-        "LangchainInstrumentor failed to load; continuing without framework-level tracing."
-    )
+# AgentCore's OTEL launcher configures the provider/exporter. Initialize the
+# LangChain callbacks explicitly as a guarded fallback so LangGraph ToolNode
+# executions are always exported as tool spans for AgentCore Evaluations.
+_langchain_instrumentor = LangchainInstrumentor()
+if not _langchain_instrumentor.is_instrumented_by_opentelemetry:
+    _langchain_instrumentor.instrument()
+
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
 app = BedrockAgentCoreApp()
 
@@ -38,23 +23,41 @@ logger = logging.getLogger(__name__)
 
 
 # Define the agent using LangGraph construction with AgentCore Memory
-def create_market_trends_agent():
-    """Create and configure the LangGraph market trends agent with memory"""
+def create_market_trends_agent() -> Any:
+    """Create and configure the LangGraph market trends agent with memory."""
+
     from langchain_aws import ChatBedrock
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode, tools_condition
+    from tools import (
+        collect_broker_preferences_interactively,
+        create_memory_tools,
+        generate_market_summary_for_broker,
+        get_broker_card_template,
+        get_market_overview,
+        get_memory_from_ssm,
+        get_sector_data,
+        get_stock_data,
+        parse_broker_profile_from_message,
+        read_skill,
+        search_news,
+    )
 
     # Get memory from SSM (created during deployment)
     memory_client, memory_id = get_memory_from_ssm()
 
     # Create session ID for this conversation, but actor_id will be determined from user input
-    session_id = f"market-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    session_id = f"market-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
     # Default actor_id - will be updated when user identifies themselves
     default_actor_id = "unknown-user"
 
     # Initialize your LLM with Claude Haiku 4.5 using inference profile
     llm = ChatBedrock(
-        model_id="global.anthropic.claude-haiku-4-5-20251001-v1:0",
-        model_kwargs={"temperature": 0.1},
+        model="global.anthropic.claude-haiku-4-5-20251001-v1:0",
+        provider="anthropic",
+        model_kwargs={"temperature": 0.1, "max_tokens": 4096},
     )
 
     # Create memory tools using the memory_tools module
@@ -62,8 +65,11 @@ def create_market_trends_agent():
 
     # Bind tools to the LLM (market data tools + memory tools + conversational broker tools)
     tools = [
+        read_skill,
         get_stock_data,
         search_news,
+        get_market_overview,
+        get_sector_data,
         parse_broker_profile_from_message,
         generate_market_summary_for_broker,
         get_broker_card_template,
@@ -85,7 +91,17 @@ def create_market_trends_agent():
     
     Real-Time Market Data:
     - get_stock_data(symbol): Retrieves current stock prices, changes, and market data
-    - search_news(query, news_source): Searches multiple news sources (Bloomberg, Reuters, CNBC, WSJ, Financial Times, Dow Jones) for business news and market intelligence
+    - search_news(query): Searches the runtime's default business-news source
+    - get_market_overview(): Returns deterministic reference index, sector, and mover data for skill evaluation workflows
+    - get_sector_data(sector): Returns deterministic reference trend, outlook, risk, and holdings data for a sector
+
+    MARKET ANALYSIS SKILLS:
+    Before a specialized analysis, load exactly one relevant skill with read_skill(path), then follow every required workflow step and reproduce its Output Format exactly. Do not add a preamble:
+    - Price trend or momentum: skills/trend-analysis/SKILL.md
+    - Sector allocation or rotation: skills/sector-rotation/SKILL.md
+    - Earnings or valuation: skills/earnings-snapshot/SKILL.md
+    - Portfolio concentration or risk: skills/portfolio-risk/SKILL.md
+    Use the canonical path exactly, including the trailing /SKILL.md. Do not load a skill for a general market overview, broker-profile management, or unrelated conversation.
     
     Broker Profile Collection (Conversational):
     - parse_broker_profile_from_message(user_message): Parse structured broker profile from user input
@@ -169,7 +185,7 @@ def create_market_trends_agent():
     CRITICAL: Always use the memory tools to maintain and reference broker financial profiles. This is essential for providing personalized, professional market intelligence services."""
 
     # Define the chatbot node with automatic conversation saving
-    def chatbot(state: MessagesState):
+    def chatbot(state: MessagesState) -> dict[str, Any]:
         raw_messages = state["messages"]
 
         # Remove any existing system messages to avoid duplicates
@@ -182,13 +198,15 @@ def create_market_trends_agent():
             msg = non_system_messages[i]
 
             # Check if message has content (for regular messages)
-            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
-                filtered_messages.append(msg)
-            # Check if message has tool_calls (for tool_use messages)
-            elif hasattr(msg, "tool_calls") and msg.tool_calls:
-                filtered_messages.append(msg)
-            # Check if message has tool_call_id (for tool_result messages)
-            elif hasattr(msg, "tool_call_id") and msg.tool_call_id:
+            if (
+                hasattr(msg, "content")
+                and isinstance(msg.content, str)
+                and msg.content.strip()
+                or hasattr(msg, "tool_calls")
+                and msg.tool_calls
+                or hasattr(msg, "tool_call_id")
+                and msg.tool_call_id
+            ):
                 filtered_messages.append(msg)
             # Check for content list with tool blocks
             elif hasattr(msg, "content") and isinstance(msg.content, list):
@@ -223,11 +241,15 @@ def create_market_trends_agent():
         # Save conversation to AgentCore Memory - let the agent handle actor_id through tools
         # The agent will use identify_broker() tool to get the correct actor_id when needed
         latest_user_message = next(
-            (msg.content for msg in reversed(messages) if isinstance(msg, HumanMessage)),
+            (
+                msg.content
+                for msg in reversed(messages)
+                if isinstance(msg, HumanMessage) and isinstance(msg.content, str)
+            ),
             None,
         )
 
-        if latest_user_message and response.content.strip():
+        if latest_user_message and isinstance(response.content, str) and response.content.strip():
             # Use default actor_id for conversation saving - the agent tools will handle proper identification
             conversation = [
                 (latest_user_message, "USER"),
@@ -246,8 +268,8 @@ def create_market_trends_agent():
                         messages=conversation,
                     )
                     logger.info(f"Conversation saved to AgentCore Memory for session: {session_id}")
-                except Exception as e:
-                    logger.error(f"Error saving conversation to memory: {e}")
+                except Exception as error:  # noqa: BLE001 - memory must not fail the response
+                    logger.warning("Error saving conversation to memory: %s", error)
 
         # Return updated messages
         return {"messages": raw_messages + [response]}
@@ -273,41 +295,37 @@ def create_market_trends_agent():
     return graph_builder.compile()
 
 
-# Initialize the agent
-agent = create_market_trends_agent()
+# Lazily build the graph on the first invocation so AgentCore's HTTP server
+# becomes healthy within the Runtime initialization window.
+_agent: Any | None = None
+
+
+def _invoke_market_trends_agent(user_input: str) -> Any:
+    global _agent
+
+    from langchain_core.messages import HumanMessage
+
+    if _agent is None:
+        _agent = create_market_trends_agent()
+    response = _agent.invoke({"messages": [HumanMessage(content=user_input)]})
+    return response["messages"][-1].content
 
 
 @app.entrypoint
-def market_trends_agent_runtime(payload):
-    """
-    Invoke the market trends agent with a payload for AgentCore Runtime
-    """
+def market_trends_agent_runtime(payload: dict[str, Any]) -> Any:
+    """Invoke the market trends agent in AgentCore Runtime."""
     user_input = payload.get("prompt")
-
-    # Create the input in the format expected by LangGraph
-    response = agent.invoke({"messages": [HumanMessage(content=user_input)]})
-
-    # Extract the final message content
-    return response["messages"][-1].content
+    if not isinstance(user_input, str) or not user_input.strip():
+        raise ValueError("payload.prompt must be a non-empty string")
+    return _invoke_market_trends_agent(user_input)
 
 
-def market_trends_agent_local(payload):
-    """
-    Invoke the market trends agent with a payload for local testing
-
-    Args:
-        payload (dict): Dictionary containing the user prompt
-
-    Returns:
-        str: The agent's response containing market analysis and data
-    """
+def market_trends_agent_local(payload: dict[str, Any]) -> Any:
+    """Invoke the market trends agent for local testing."""
     user_input = payload.get("prompt")
-
-    # Create the input in the format expected by LangGraph
-    response = agent.invoke({"messages": [HumanMessage(content=user_input)]})
-
-    # Extract the final message content
-    return response["messages"][-1].content
+    if not isinstance(user_input, str) or not user_input.strip():
+        raise ValueError("payload.prompt must be a non-empty string")
+    return _invoke_market_trends_agent(user_input)
 
 
 if __name__ == "__main__":

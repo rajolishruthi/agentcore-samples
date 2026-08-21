@@ -15,7 +15,7 @@ Use this skill when a user asks about sector allocation, where to rotate capital
 
 1. Retrieve the overall market overview using `get_market_overview`.
 2. Retrieve detailed data for the following sectors using `get_sector_data` for each: technology, healthcare, financials, energy, consumer_staples, consumer_discretionary.
-3. Search for macro news using `search_news` with sector="macro" to understand the rate/GDP backdrop.
+3. Search for macroeconomic news using `search_news` with a query covering rates, inflation, and GDP. Keep the runtime's default news source.
 4. Rank sectors by today's performance and YTD trend direction.
 5. Classify each sector as **Overweight**, **Neutral**, or **Underweight** based on:
    - Today's performance relative to the broad market
